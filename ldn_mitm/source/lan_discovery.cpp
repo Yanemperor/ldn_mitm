@@ -341,7 +341,23 @@ namespace ams::mitm::ldn {
         this->hostLastSeen = os::GetSystemTick();
         this->networkInfo = *info;
         if (this->state == CommState::Station) {
-            this->setState(CommState::StationConnected);
+            /* Relay join: flip to connected only once the host's node list
+               actually includes us. A bssid match alone can be a periodic
+               re-broadcast from before the host processed our Connect (which
+               may have been dropped on the relay) - accepting it would leave
+               us "connected" while the host has no idea we exist. */
+            bool present = (this->joinAwaitSelfIp == 0);
+            for (int i = 0; !present && i < NodeCountMax; i++) {
+                if (info->ldn.nodes[i].isConnected &&
+                    info->ldn.nodes[i].ipv4Address == this->joinAwaitSelfIp) {
+                    present = true;
+                }
+            }
+            if (present) {
+                this->setState(CommState::StationConnected);
+            } else {
+                LogFormat("onSyncNetwork: host has not registered us yet, still connecting");
+            }
         }
         this->onNetworkInfoChanged();
 
@@ -1092,6 +1108,7 @@ namespace ams::mitm::ldn {
             std::scoped_lock lock(this->dataMutex);
             this->joinActive = false;
             this->relayJoined = false;
+            this->joinAwaitSelfIp = 0;
         }
         this->setState(CommState::Station);
 
@@ -1174,6 +1191,7 @@ namespace ams::mitm::ldn {
             std::scoped_lock lock(this->dataMutex);
             this->joinActive = false;
             this->relayJoined = false;
+            this->joinAwaitSelfIp = 0;
         }
 
         this->setState(CommState::Station);
@@ -1242,6 +1260,7 @@ namespace ams::mitm::ldn {
             {
                 std::scoped_lock lock(this->dataMutex);
                 this->initNodeStateChange();
+                this->joinAwaitSelfIp = myNode.ipv4Address;
             }
             LogFormat("relay connect: sending Connect to host %08x", hostIp);
             this->relay->send(LANPacketType::Connect, &myNode, sizeof(myNode));
@@ -1271,7 +1290,13 @@ namespace ams::mitm::ldn {
             }
             /* No SyncNetwork over the relay: the host may be a local console
                not on the relay - fall through to a direct TCP join (same-LAN
-               hostIp still reaches it; a remote host just times out below). */
+               hostIp still reaches it; a remote host just times out below).
+               The TCP connection is its own confirmation, so drop the
+               node-membership requirement for that path. */
+            {
+                std::scoped_lock lock(this->dataMutex);
+                this->joinAwaitSelfIp = 0;
+            }
             LogFormat("relay connect: no SyncNetwork, falling back to direct TCP to %08x", hostIp);
         }
 

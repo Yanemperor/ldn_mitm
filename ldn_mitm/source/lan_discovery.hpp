@@ -238,6 +238,12 @@ namespace ams::mitm::ldn {
             os::Tick hostLastSeen = os::Tick(0);
             bool relayJoined = false;
             u32 relayJoinedIp = 0;
+            /* While a relay join is in flight: our own IP. We only count as
+               StationConnected once the host's SyncNetwork actually lists this
+               IP - a bssid match alone can be a re-broadcast that predates the
+               host registering our (possibly dropped) Connect. 0 = not
+               joining over the relay. Guarded by dataMutex. */
+            u32 joinAwaitSelfIp = 0;
             /* Host side: when we last advertised over the relay, for the rate
                limit. Guarded by dataMutex. */
             os::Tick lastRelayAdvertise = os::Tick(0);
