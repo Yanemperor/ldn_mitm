@@ -100,6 +100,17 @@ namespace ams::mitm::ldn {
                    host). Call periodically from the worker. */
                 int SendKeepalive();
 
+                /* Path-liveness probe: keepalives are send-only, so send a
+                   PING (0x02) the server echoes back. Counts a miss until any
+                   frame arrives. Call once per beacon tick. */
+                int SendPing();
+
+                /* True when the server path is gone: socket closed, or - only
+                   against a server that has echoed at least one ping (some
+                   relays don't implement 0x02) - several pings unanswered.
+                   The owner should Close()+Open() to recover. */
+                bool PathDead() const;
+
                 /* Receive one relay frame. A discovery frame (UDP dst 11452) is
                    copied to out (returns length, sets *out_src_ip to its virtual
                    IP); a peer game frame is handed to GameRx (returns 0). <0 on
@@ -119,6 +130,14 @@ namespace ams::mitm::ldn {
                 /* Build [0x01][IPv4+UDP+payload] and send to the relay. */
                 int SendWrapped(u32 src, u32 dst, u16 sport, u16 dport, u16 ip_id, const void *payload, size_t len);
 
+                /* Shared tail of RecvBroadcast: route one bare IPv4 packet
+                   (whole or reassembled) to the discovery caller or GameRx. */
+                int ProcessIpv4(const u8 *ip, size_t iplen, void *out, size_t max_size, u32 *out_src_ip);
+
+                /* One lan-play IPV4_FRAG (0x03) frame: stash the part; returns
+                   the completed packet (sets *out_len) or nullptr. */
+                const u8 *ReassembleFrag(const u8 *p, size_t n, size_t *out_len);
+
                 /* Resolve a hostname to IPv4 (host order) via a hand-built DNS
                    query (libnx getaddrinfo aborts in this sysmodule). 0 on
                    failure. */
@@ -134,6 +153,26 @@ namespace ams::mitm::ldn {
                 bool m_have_nifm_session = false;
                 u32 m_vsrc = 0;
                 u32 m_rsrc = 0;   /* our REAL IP, host order */
+
+                /* Ping liveness (see SendPing/PathDead). Reset by Open(). */
+                static constexpr u32 PingMaxMisses = 4;
+                u32 m_ping_misses = 0;
+                bool m_ping_supported = false;
+
+                /* Reassembly slots for peers that fragment (pmtu-configured
+                   lan-play clients). Any accepted packet is <= 1500, so 1600
+                   bounds every in-slot write. */
+                static constexpr int FragSlots = 4;
+                struct FragSlot {
+                    bool used;
+                    u16 id;
+                    u32 src;
+                    u8 mask;
+                    u16 total_len;
+                    u8 buffer[1600];
+                };
+                FragSlot m_frags[FragSlots] = {};
+                u8 m_frag_evict = 0;
         };
 
     }

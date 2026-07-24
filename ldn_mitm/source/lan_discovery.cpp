@@ -222,7 +222,7 @@ namespace ams::mitm::ldn {
                     if (this->discovery->getState() == CommState::Station ||
                         this->discovery->getState() == CommState::StationConnected) {
                         LogFormat("relay: got SyncNetwork");
-                        this->discovery->onSyncNetwork(info);
+                        this->discovery->onSyncNetwork(info, this->lastRecvSeq());
                     }
                     break;
                 }
@@ -315,7 +315,7 @@ namespace ams::mitm::ldn {
         return ret;
     }
 
-    void LANDiscovery::onSyncNetwork(NetworkInfo *info) {
+    void LANDiscovery::onSyncNetwork(NetworkInfo *info, u16 relaySeq) {
         std::scoped_lock lock(this->dataMutex);
         /* Accept sync only for the network we're joining (joinActive + bssid
            match): a shared relay carries other sessions' SyncNetwork, and a
@@ -323,6 +323,19 @@ namespace ams::mitm::ldn {
         if (!this->joinActive || !(info->common.bssid == this->joinBssid)) {
             LogFormat("onSyncNetwork: not for our target network, ignoring");
             return;
+        }
+        /* Relay path is unordered UDP: drop a duplicate or a sync older than
+           what we already applied, so a delayed frame can't regress the node
+           list. "Older" = within a window behind the latest; a far jump
+           backwards is the host's socket restarting its counter, accept it. */
+        if (relaySeq != 0) {
+            if (this->relaySyncSeqValid && (u16)(this->relaySyncSeq - relaySeq) < 256) {
+                LogFormat("onSyncNetwork: stale relay seq %u (have %u), dropping",
+                    relaySeq, this->relaySyncSeq);
+                return;
+            }
+            this->relaySyncSeq = relaySeq;
+            this->relaySyncSeqValid = true;
         }
         /* Host-originated traffic for our network counts as host liveness. */
         this->hostLastSeen = os::GetSystemTick();
@@ -866,6 +879,23 @@ namespace ams::mitm::ldn {
                         this->relay->keepalive();
                     }
 
+                    /* Server-path liveness (the keepalive is send-only): probe
+                       with PING - the server echoes it - and reopen the
+                       transport in place when the path dies (server restart,
+                       expired NAT mapping, wifi loss). Peer state lives on
+                       this side, so a successful reopen resumes the session
+                       at the next beacon. */
+                    if (this->relay->pathDead()) {
+                        if (os::ConvertToTimeSpan(now - this->lastRelayReconnect).GetMilliSeconds() >= RelayReconnectMinIntervalMs) {
+                            this->lastRelayReconnect = now;
+                            LogFormat("relay: server path dead, reconnecting transport");
+                            const Result rc = this->relay->reopen();
+                            LogFormat("relay: reconnect %s (%x)", R_SUCCEEDED(rc) ? "ok" : "failed", rc);
+                        }
+                    } else {
+                        this->relay->ping();
+                    }
+
                     /* Relay-only peer-loss detection (no TCP close to signal
                        it): reap peers silent longer than RelayPeerTimeoutMs.
                        Checked on the beacon cadence. */
@@ -1196,6 +1226,7 @@ namespace ams::mitm::ldn {
             std::scoped_lock lock(this->dataMutex);
             this->joinBssid = networkInfo->common.bssid;
             this->joinActive = true;
+            this->relaySyncSeqValid = false;
         }
 
         /* Relay mode: the host's IP is unroutable directly across the internet,
@@ -1227,6 +1258,14 @@ namespace ams::mitm::ldn {
                         this->hostLastSeen  = os::GetSystemTick();
                     }
                     return 0;
+                }
+                /* Either the Connect or the answering SyncNetwork can be lost
+                   on the internet path; retransmit every 500ms instead of
+                   burning the whole window on one shot. The host treats a
+                   duplicate Connect as a re-sync, so retransmits are safe. */
+                if (j % 50 == 49) {
+                    LogFormat("relay connect: retransmitting Connect");
+                    this->relay->send(LANPacketType::Connect, &myNode, sizeof(myNode));
                 }
                 svcSleepThread(10000000L); /* 10ms */
             }

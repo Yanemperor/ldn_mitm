@@ -13,6 +13,11 @@ It speaks lan-play's client<->server protocol: UDP, each datagram is
                          least one IPv4 frame (ldn_mitm re-broadcasts its
                          advertisement periodically) before it is routable.
   type 0x01 IPV4       - payload is a bare IPv4 packet (IP header + L4 + data)
+  type 0x02 PING       - liveness probe; the first 4 bytes are echoed back to
+                         the sender (ldn_mitm uses this to detect a dead relay
+                         path and reconnect).
+  type 0x03 IPV4_FRAG  - fragmented IPv4 for small-MTU paths; forwarded by the
+                         src/dst in its 16-byte header, clients reassemble.
   (other types are ignored)
 
 Routing, exactly like a real lan-play server:
@@ -39,6 +44,8 @@ import time
 
 TYPE_KEEPALIVE = 0x00
 TYPE_IPV4 = 0x01
+TYPE_PING = 0x02
+TYPE_IPV4_FRAG = 0x03
 IDLE_TIMEOUT = 60.0  # seconds before a silent client is forgotten
 
 
@@ -103,11 +110,25 @@ def main():
                     clients[vsrc] = (ep, now)
             continue
 
-        if msg_type != TYPE_IPV4 or len(payload) < 20:
+        if msg_type == TYPE_PING:
+            # Echo the first 4 bytes back (lan-play server semantics).
+            try:
+                sock.sendto(data[:4], addr)
+            except OSError:
+                pass
             continue
 
-        src4 = payload[12:16]
-        dst4 = payload[16:20]
+        # Route IPv4 frames by the packet's addresses, fragments by their
+        # frag-header addresses (src[4] dst[4] at offsets 0/4); fragments are
+        # forwarded as-is, the receiving client reassembles.
+        if msg_type == TYPE_IPV4 and len(payload) >= 20:
+            src4 = payload[12:16]
+            dst4 = payload[16:20]
+        elif msg_type == TYPE_IPV4_FRAG and len(payload) >= 16:
+            src4 = payload[0:4]
+            dst4 = payload[4:8]
+        else:
+            continue
 
         prev = clients.get(src4)
         clients[src4] = (addr, now)

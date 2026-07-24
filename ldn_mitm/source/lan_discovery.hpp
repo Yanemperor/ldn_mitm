@@ -153,6 +153,17 @@ namespace ams::mitm::ldn {
                also marks the session for rebuild (defined in the .cpp). */
             void onClose() override;
             void keepalive() { this->transport.SendKeepalive(); }
+            void ping() { this->transport.SendPing(); }
+            bool pathDead() const { return this->transport.PathDead(); }
+            /* In-place server reconnect (server restart, expired NAT mapping):
+               the relay protocol is connectionless and all session state lives
+               in LANDiscovery, so a reopened socket just resumes on the next
+               beacon. Unlike onClose this does NOT mark the session for
+               rebuild. */
+            Result reopen() {
+                this->transport.Close();
+                return this->transport.Open();
+            }
             /* Broadcast a LANPacket over the relay (sendto ignores the addr,
                so it reaches every other console). */
             int send(LANPacketType type, const void *data, size_t size) {
@@ -174,6 +185,10 @@ namespace ams::mitm::ldn {
             /* Min gap between relay advertisements: the 5s beacon already
                reaches everyone, so don't also answer every scanner's Scan. */
             static constexpr s64 RelayAdvertiseMinIntervalMs = 2000;
+            /* Min gap between transport reopen attempts once the server path
+               is declared dead (RelayTransport::PathDead) - Open() blocks the
+               worker for seconds, so don't hammer it every beacon. */
+            static constexpr s64 RelayReconnectMinIntervalMs = 15000;
             static const char *FakeSsid;
             typedef std::function<int(LANPacketType, const void *, size_t)> ReplyFunc;
             typedef std::function<void()> LanEventFunc;
@@ -210,6 +225,12 @@ namespace ams::mitm::ldn {
                connected by a stray broadcast). Guarded by dataMutex. */
             MacAddress joinBssid{};
             bool joinActive = false;
+            /* Highest header seq applied from the host's relay SyncNetwork:
+               the relay path is unordered UDP, so a delayed older sync must
+               not regress the node list. Reset when a join target is
+               recorded. Guarded by dataMutex. */
+            u16 relaySyncSeq = 0;
+            bool relaySyncSeqValid = false;
             /* Station side, relay joins only: host-liveness timestamp, whether
                this join went over the relay (TCP joins detect loss via socket
                close), and our advertised IP (echoed in heartbeats). Guarded by
@@ -220,6 +241,8 @@ namespace ams::mitm::ldn {
             /* Host side: when we last advertised over the relay, for the rate
                limit. Guarded by dataMutex. */
             os::Tick lastRelayAdvertise = os::Tick(0);
+            /* Last transport reopen attempt (worker-only). */
+            os::Tick lastRelayReconnect = os::Tick(0);
             /* What initialize() latched, so openAccessPoint/openStation can
                detect a toggle change or sleep teardown and rebuild (see
                refreshNetworkSession). */
@@ -232,7 +255,9 @@ namespace ams::mitm::ldn {
             CommState state;
             void worker();
             int loopPoll();
-            void onSyncNetwork(NetworkInfo *info);
+            /* relaySeq: header seq of a relay-received sync (0 = TCP path or
+               unstamped sender -> no staleness check; TCP is ordered). */
+            void onSyncNetwork(NetworkInfo *info, u16 relaySeq = 0);
             void onConnect(int new_fd);
             /* Relay mode: a station joined by sending Connect over the relay
                (no per-station TCP socket). */

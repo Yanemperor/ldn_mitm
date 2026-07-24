@@ -29,7 +29,10 @@ struct LANPacketHeader {
     u8 compressed;
     u16 length;
     u16 decompress_length;
-    u8 _reserved[2];
+    /* Per-socket send counter (was _reserved; stock builds send 0 and never
+       read it). Lets a receiver on an unordered path (the relay) drop a
+       stale/duplicate frame; 0 = sender doesn't stamp. */
+    u16 seq;
 };
 class LanSocket {
     protected:
@@ -38,6 +41,8 @@ class LanSocket {
         int fd;
         u8 buffer[BufferSize];
         u16 recvSize;
+        u16 txSeq = 0;
+        u16 rxSeq = 0;
         void resetRecvSize();
         void prepareHeader(LANPacketHeader &header, LANPacketType type);
         int compress(const void *input, size_t input_size, uint8_t *output, size_t *output_size);
@@ -51,6 +56,9 @@ class LanSocket {
         int sendPacket(LANPacketType type, const void *data, size_t size);
         int sendPacket(LANPacketType type, const void *data, size_t size, struct sockaddr_in *addr);
         int recvPacket(MessageCallback callback);
+        /* seq of the packet recvPacket last delivered; valid inside/after its
+           callback. */
+        u16 lastRecvSeq() const { return this->rxSeq; };
         void close();
         bool isClosed() { return this->fd == -1; };
         int getFd() { return this->fd; };
