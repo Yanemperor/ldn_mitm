@@ -42,9 +42,12 @@ namespace ams::mitm::ldn::relay {
         constexpr u8 TypePing      = 0x02; /* server echoes first 4 bytes back */
         constexpr u8 TypeIpv4Frag  = 0x03;
 
-        /* 1500-byte frame minus relay type (1) + IPv4 (20) + UDP (8). Must
-           admit near-MTU game datagrams (pia titles). */
-        constexpr size_t MaxWrapPayload = 1500 - 1 - 20 - 8; /* 1471 */
+        /* Largest game datagram we carry: a full 1500-MTU UDP payload. Wrapped
+           it exceeds one 1500-byte relay frame by a byte, so anything over
+           SingleFrameMax goes out as IPV4_FRAG fragments instead of being
+           dropped (Pokemon Let's Go sends exactly 1472). */
+        constexpr size_t MaxWrapPayload = 1472;
+        constexpr size_t SingleFrameMax = 1500;
 
         /* IPv4 header checksum (16-bit ones-complement over the header). */
         u16 IpChecksum(const u8 *d, size_t n) {
@@ -587,7 +590,7 @@ namespace ams::mitm::ldn::relay {
     }
 
     int RelayTransport::SendWrapped(u32 src, u32 dst, u16 sport, u16 dport, u16 ip_id, const void *payload, size_t len) {
-        u8 buf[1500];
+        u8 buf[1 + 20 + 8 + MaxWrapPayload];
         const u16 udplen = static_cast<u16>(8 + len);
         const u16 total  = static_cast<u16>(20 + udplen);
         buf[0] = TypeIpv4;
@@ -607,7 +610,53 @@ namespace ams::mitm::ldn::relay {
         udp[4] = udplen >> 8; udp[5] = udplen & 0xff;
         udp[6] = 0; udp[7] = 0;
         std::memcpy(udp + 8, payload, len);
+
+        /* A full-MTU game datagram (1472B payload) does not fit one relay
+           frame once wrapped, and dropping it silently costs the session -
+           Pokemon Let's Go sends exactly that size and only its small packets
+           were getting through. Split the wrapped packet across IPV4_FRAG
+           frames, which the receiving side already reassembles. */
+        if (static_cast<size_t>(total) + 1 > SingleFrameMax) {
+            return this->SendFragmented(src, dst, ip, total);
+        }
         return send(m_fd, buf, 1 + total, 0);
+    }
+
+    int RelayTransport::SendFragmented(u32 src, u32 dst, const u8 *packet, size_t total) {
+        /* lan-play IPV4_FRAG (16B big-endian header): src dst id part
+           total_part len pmtu; the chunk belongs at pmtu*part of the packet. */
+        constexpr u16 Pmtu = 1024;
+        const u8 parts = static_cast<u8>((total + Pmtu - 1) / Pmtu);
+        if (parts == 0 || parts > 8) {   /* 8 = receiver's completion mask width */
+            return -1;
+        }
+        const u16 id = m_frag_send_id++;
+        int last = -1;
+        for (u8 part = 0; part < parts; part++) {
+            const size_t off   = static_cast<size_t>(Pmtu) * part;
+            const size_t remaining = total - off;
+            const size_t chunk = remaining < static_cast<size_t>(Pmtu) ? remaining : static_cast<size_t>(Pmtu);
+
+            u8 f[1 + 16 + Pmtu];
+            f[0] = TypeIpv4Frag;
+            u8 *h = f + 1;
+            h[0] = (src >> 24) & 0xff; h[1] = (src >> 16) & 0xff;
+            h[2] = (src >> 8) & 0xff;  h[3] = src & 0xff;
+            h[4] = (dst >> 24) & 0xff; h[5] = (dst >> 16) & 0xff;
+            h[6] = (dst >> 8) & 0xff;  h[7] = dst & 0xff;
+            h[8] = id >> 8; h[9] = id & 0xff;
+            h[10] = part;
+            h[11] = parts;
+            h[12] = static_cast<u8>(chunk >> 8); h[13] = static_cast<u8>(chunk & 0xff);
+            h[14] = Pmtu >> 8; h[15] = Pmtu & 0xff;
+            std::memcpy(h + 16, packet + off, chunk);
+
+            last = send(m_fd, f, 1 + 16 + chunk, 0);
+            if (last < 0) {
+                return last;
+            }
+        }
+        return last;
     }
 
     int RelayTransport::SendBroadcast(const void *lan_packet, size_t size) {
