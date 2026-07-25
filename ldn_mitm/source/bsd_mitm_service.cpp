@@ -68,13 +68,33 @@ namespace ams::mitm::ldn {
             return true;
         }
 
+        /* getsockopt SO_TYPE (bsd cmd 17) on the forward session. Wire (libnx
+           bsd.c): in { s32 sockfd; u32 level; u32 optname }, out { s32 ret;
+           s32 errno; u32 optlen }, one AutoSelect-Out optval. False on any
+           failure. */
+        bool GetForwardSockType(::Service *fwd, s32 sockfd, s32 *out_type) {
+            s32 so_type = 0;
+            const struct { s32 sockfd; u32 level; u32 optname; } in = { sockfd, SOL_SOCKET, SO_TYPE };
+            struct { s32 ret; s32 bsd_errno; u32 optlen; } out = {};
+            const Result rc = serviceDispatchInOut(fwd, 17, in, out,
+                .buffer_attrs = { SfBufferAttr_HipcAutoSelect | SfBufferAttr_Out },
+                .buffers = { { std::addressof(so_type), sizeof(so_type) } },
+            );
+            if (R_FAILED(rc) || out.ret != 0 || out.optlen < sizeof(so_type)) {
+                return false;
+            }
+            *out_type = so_type;
+            return true;
+        }
+
         /* Is this the socket the game receives its LDN session traffic on?
            Games can send and receive on different sockets - Tomodachi sends
            from fd 0 and receives on fd 3 - so a single fd latched from SendTo
            identifies the wrong one and we would refuse to serve the receive.
            Match on the socket's bound port instead, against the port the relay
-           frames are addressed to. One getsockname per receive is cheap next
-           to the IPC we are already handling. */
+           frames are addressed to. Must also be SOCK_DGRAM: the game's TCP
+           side (tcp_relay) can sit on the same port number, and a TCP read
+           must never be served a UDP datagram. */
         bool IsGameRecvSocket(::Service *fwd, s32 sockfd) {
             const u16 want = GameRx::SessionDport();
             if (want == 0) {
@@ -84,27 +104,53 @@ namespace ams::mitm::ldn {
             if (!GetForwardBoundPort(fwd, sockfd, std::addressof(bound))) {
                 return false;
             }
-            return bound != 0 && bound == want;
+            if (bound == 0 || bound != want) {
+                return false;
+            }
+            s32 so_type = 0;
+            return GetForwardSockType(fwd, sockfd, std::addressof(so_type)) && so_type == SOCK_DGRAM;
         }
 
-        /* Block until a relay frame is queued for the game socket. In relay
-           mode peer datagrams only ever arrive through the relay, so the real
-           socket stays empty forever - forwarding the game's blocking receive
-           would park that thread inside the real bsd:u permanently. Waiting
-           here is what the game's recv is actually waiting for. Bails out when
-           the LDN session ends, and caps the wait so a dead client cannot pin
-           the thread; the caller then falls through to the verbatim forward. */
-        void WaitForGameRx() {
-            if (GameRx::HasData()) {
-                return;
-            }
-            constexpr int WaitSliceMs = 2;
-            constexpr int WaitMaxMs   = 2000;
-            for (int waited = 0; waited < WaitMaxMs; waited += WaitSliceMs) {
+        /* Zero-timeout poll (cmd 6) on the real socket: does it have traffic
+           of its own (local peers deliver through the stack)? Never blocks.
+           Any revents counts - on an error the verbatim forward reports it. */
+        bool ForwardSocketReadable(::Service *fwd, s32 sockfd) {
+            struct pollfd pfd_in  = { .fd = sockfd, .events = POLLIN, .revents = 0 };
+            struct pollfd pfd_out = pfd_in;
+            const struct { u32 nfds; s32 timeout; } in = { 1, 0 };
+            struct { s32 ret; s32 bsd_errno; } out = {};
+            const Result rc = serviceDispatchInOut(fwd, 6, in, out,
+                .buffer_attrs = {
+                    SfBufferAttr_HipcAutoSelect | SfBufferAttr_In,
+                    SfBufferAttr_HipcAutoSelect | SfBufferAttr_Out,
+                },
+                .buffers = {
+                    { std::addressof(pfd_in),  sizeof(pfd_in)  },
+                    { std::addressof(pfd_out), sizeof(pfd_out) },
+                },
+            );
+            return R_SUCCEEDED(rc) && out.ret > 0 && pfd_out.revents != 0;
+        }
+
+        /* Block until the game's receive can be answered. In relay mode peer
+           datagrams only arrive through the relay, so a blocking receive
+           forwarded verbatim would park inside the real bsd:u forever. Wait
+           while the session is alive; return false (= forward verbatim) when
+           it ends or the real socket has data of its own. */
+        bool WaitForGameRx(::Service *fwd, s32 sockfd) {
+            constexpr int WaitSliceMs   = 2;
+            constexpr u32 RealPeekEvery = 12; /* slices: probe the real socket ~every 24ms */
+            for (u32 slice = 0; ; slice++) {
+                if (GameRx::HasData()) {
+                    return true;
+                }
                 SessionRegistry::Snapshot snap;
                 SessionRegistry::Get(std::addressof(snap));
-                if (!snap.active || GameRx::HasData()) {
-                    break;
+                if (!snap.active) {
+                    return false;
+                }
+                if ((slice % RealPeekEvery) == 0 && ForwardSocketReadable(fwd, sockfd)) {
+                    return false;
                 }
                 svcSleepThread(WaitSliceMs * 1000000L);
             }
@@ -113,12 +159,15 @@ namespace ams::mitm::ldn {
         /* Shared body of the payload-only receive paths (recv/read): serve one
            queued relay frame if this is the game's session socket. Neither
            reports a source address, so the peer IP is dropped. */
-        bool ServeQueuedPayload(::Service *fwd, s32 sockfd, const sf::OutAutoSelectBuffer &message,
+        bool ServeQueuedPayload(::Service *fwd, s32 sockfd, bool dontwait, const sf::OutAutoSelectBuffer &message,
                                 sf::Out<s32> &ret, sf::Out<s32> &bsd_errno, const char *tag) {
             if (!IsGameRecvSocket(fwd, sockfd)) {
                 return false;
             }
-            WaitForGameRx();
+            /* MSG_DONTWAIT: serve only what is already queued. */
+            if (dontwait ? !GameRx::HasData() : !WaitForGameRx(fwd, sockfd)) {
+                return false;
+            }
 
             size_t out_len = 0;
             if (!GameRx::Pop(nullptr, nullptr, message.GetPointer(), message.GetSize(), std::addressof(out_len))) {
@@ -419,9 +468,9 @@ namespace ams::mitm::ldn {
         if (relay::IsEnabled() &&
             (flags & MSG_PEEK) == 0 &&               /* don't consume on a peek */
             src_addr.GetSize() >= sizeof(struct sockaddr_in) &&
-            IsGameRecvSocket(this->m_forward_service.get(), sockfd)) {
-
-            WaitForGameRx();
+            IsGameRecvSocket(this->m_forward_service.get(), sockfd) &&
+            ((flags & MSG_DONTWAIT) != 0 ? GameRx::HasData()
+                                         : WaitForGameRx(this->m_forward_service.get(), sockfd))) {
 
             /* Pop straight into the IPC buffer: Pop already clamps to max_len. */
             u32 src_ip = 0; u16 sport = 0; size_t out_len = 0;
@@ -469,7 +518,8 @@ namespace ams::mitm::ldn {
         }
 
         if (relay::IsEnabled() && (flags & MSG_PEEK) == 0 &&
-            ServeQueuedPayload(this->m_forward_service.get(), sockfd, message, ret, bsd_errno, "Recv")) {
+            ServeQueuedPayload(this->m_forward_service.get(), sockfd, (flags & MSG_DONTWAIT) != 0,
+                               message, ret, bsd_errno, "Recv")) {
             R_SUCCEED();
         }
 
@@ -487,12 +537,18 @@ namespace ams::mitm::ldn {
             if (sa->sin_family == AF_INET) {
                 const u32 ip   = ntohl(sa->sin_addr.s_addr);
                 const u16 port = ntohs(sa->sin_port);
-                s32 r = 0, e = 0;
-                if (tcprelay::RedirectConnect(this->m_forward_service.get(), sockfd, ip, port,
-                                              std::addressof(r), std::addressof(e))) {
-                    ret.SetValue(r);
-                    bsd_errno.SetValue(e);
-                    R_SUCCEED();
+                /* TCP only: games also connect() UDP sockets to set a default
+                   peer, and the proxy would swallow their datagrams. */
+                s32 so_type = 0;
+                if (GetForwardSockType(this->m_forward_service.get(), sockfd, std::addressof(so_type)) &&
+                    so_type == SOCK_STREAM) {
+                    s32 r = 0, e = 0;
+                    if (tcprelay::RedirectConnect(this->m_forward_service.get(), sockfd, ip, port,
+                                                  std::addressof(r), std::addressof(e))) {
+                        ret.SetValue(r);
+                        bsd_errno.SetValue(e);
+                        R_SUCCEED();
+                    }
                 }
             }
         }
@@ -512,7 +568,8 @@ namespace ams::mitm::ldn {
         }
 
         if (relay::IsEnabled() &&
-            ServeQueuedPayload(this->m_forward_service.get(), sockfd, message, ret, bsd_errno, "Read")) {
+            ServeQueuedPayload(this->m_forward_service.get(), sockfd, false,
+                               message, ret, bsd_errno, "Read")) {
             R_SUCCEED();
         }
 
