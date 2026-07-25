@@ -646,18 +646,28 @@ namespace ams::mitm::ldn::relay {
         }
         const u32 src = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
 
+        /* DIAG: a peer game frame reached us - record why it is kept/dropped. */
+        static std::atomic<u32> s_inject{0};
+        const u32 in = s_inject.fetch_add(1, std::memory_order_relaxed) + 1;
+        const bool diag = (in <= 8 || (in % 256) == 0);
+
         /* Our own frame echoed back by the relay - never feed the game its own
            traffic. */
         if (src == m_rsrc) {
+            if (diag) { LogFormat("diag inject #%u DROP own-echo src %08x", in, src); }
             return;
         }
         /* Only inject during an active LDN session. */
         SessionRegistry::Snapshot snap;
         SessionRegistry::Get(&snap);
         if (!snap.active) {
+            if (diag) { LogFormat("diag inject #%u DROP session-inactive src %08x dport %u", in, src, dport); }
             return;
         }
 
+        if (diag) {
+            LogFormat("diag inject #%u PUSH src %08x sport %u dport %u len %zu", in, src, sport, dport, plen);
+        }
         /* The stack can't deliver a peer's source IP locally, so hand the frame
            to the bsd:u RecvFrom queue, which serves it with the real source. */
         GameRx::Push(src, sport, dport, payload, plen);

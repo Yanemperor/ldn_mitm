@@ -110,7 +110,41 @@ namespace ams::mitm::ldn {
     Result ICommunicationService::GetNetworkInfo(sf::Out<NetworkInfo> buffer) {
         LogFormat("get_network_info %p state: %d", buffer.GetPointer(), static_cast<u32>(this->lanDiscovery.getState()));
 
-        return lanDiscovery.getNetworkInfo(buffer.GetPointer());
+        Result rc = lanDiscovery.getNetworkInfo(buffer.GetPointer());
+
+        /* DIAG: the game polls this ~30x/s and then fails with ldn 2203-0080,
+           so log exactly what it is being shown - but only when the content
+           changes, or the log would drown. */
+        if (R_SUCCEEDED(rc)) {
+            const NetworkInfo *ni = buffer.GetPointer();
+            static u8 s_last_count = 0xff;
+            static u32 s_last_ips[NodeCountMax] = {};
+            bool changed = (ni->ldn.nodeCount != s_last_count);
+            for (int i = 0; i < NodeCountMax; i++) {
+                if (ni->ldn.nodes[i].ipv4Address != s_last_ips[i]) {
+                    changed = true;
+                }
+            }
+            if (changed) {
+                s_last_count = ni->ldn.nodeCount;
+                for (int i = 0; i < NodeCountMax; i++) {
+                    s_last_ips[i] = ni->ldn.nodes[i].ipv4Address;
+                }
+                LogFormat("diag netinfo: nodeCount %d/%d secMode %d bssid %02x%02x%02x%02x%02x%02x",
+                    ni->ldn.nodeCount, ni->ldn.nodeCountMax, ni->ldn.securityMode,
+                    ni->common.bssid.raw[0], ni->common.bssid.raw[1], ni->common.bssid.raw[2],
+                    ni->common.bssid.raw[3], ni->common.bssid.raw[4], ni->common.bssid.raw[5]);
+                for (int i = 0; i < NodeCountMax; i++) {
+                    const NodeInfo &n = ni->ldn.nodes[i];
+                    if (n.isConnected || n.ipv4Address != 0) {
+                        LogFormat("diag netinfo  node[%d] id %d conn %d ip %08x ver %d user '%.10s'",
+                            i, n.nodeId, n.isConnected, n.ipv4Address, n.localCommunicationVersion, n.userName);
+                    }
+                }
+            }
+        }
+
+        return rc;
     }
 
     Result ICommunicationService::GetDisconnectReason(sf::Out<u32> reason) {

@@ -74,6 +74,19 @@ namespace ams::mitm::ldn {
                before latching it as the game session fd. */
             static u16 PeekDport();
 
+            /* Destination port of the most recently pushed frame, remembered
+               even once the queue drains (0 until the first frame). Games can
+               send and receive on different sockets, so the receive path
+               identifies the game's socket by its bound port rather than by a
+               single latched fd. Reset by Clear. */
+            static u16 SessionDport();
+
+            /* Record the session's game port from the SEND side. The game
+               sends before it receives, so this makes the receive socket
+               identifiable from the very first recv - otherwise the first
+               receives are forwarded to a socket that will never deliver. */
+            static void NoteSessionPort(u16 port);
+
             static bool HasData();
 
             /* Session torn down: drop everything and forget the fd. */

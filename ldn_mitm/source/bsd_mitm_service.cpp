@@ -67,9 +67,145 @@ namespace ams::mitm::ldn {
             return true;
         }
 
+        /* Is this the socket the game receives its LDN session traffic on?
+           Games can send and receive on different sockets - Tomodachi sends
+           from fd 0 and receives on fd 3 - so a single fd latched from SendTo
+           identifies the wrong one and we would refuse to serve the receive.
+           Match on the socket's bound port instead, against the port the relay
+           frames are addressed to. One getsockname per receive is cheap next
+           to the IPC we are already handling. */
+        bool IsGameRecvSocket(::Service *fwd, s32 sockfd) {
+            const u16 want = GameRx::SessionDport();
+            if (want == 0) {
+                return false;
+            }
+            u16 bound = 0;
+            if (!GetForwardBoundPort(fwd, sockfd, std::addressof(bound))) {
+                return false;
+            }
+            return bound != 0 && bound == want;
+        }
+
+        /* Block until a relay frame is queued for the game socket. In relay
+           mode peer datagrams only ever arrive through the relay, so the real
+           socket stays empty forever - forwarding the game's blocking receive
+           would park that thread inside the real bsd:u permanently. Waiting
+           here is what the game's recv is actually waiting for. Bails out when
+           the LDN session ends, and caps the wait so a dead client cannot pin
+           the thread; the caller then falls through to the verbatim forward. */
+        void WaitForGameRx() {
+            if (GameRx::HasData()) {
+                return;
+            }
+            constexpr int WaitSliceMs = 2;
+            constexpr int WaitMaxMs   = 2000;
+            for (int waited = 0; waited < WaitMaxMs; waited += WaitSliceMs) {
+                SessionRegistry::Snapshot snap;
+                SessionRegistry::Get(std::addressof(snap));
+                if (!snap.active || GameRx::HasData()) {
+                    break;
+                }
+                svcSleepThread(WaitSliceMs * 1000000L);
+            }
+        }
+
+        /* Shared body of the payload-only receive paths (recv/read): serve one
+           queued relay frame if this is the game's session socket. Neither
+           reports a source address, so the peer IP is dropped. */
+        bool ServeQueuedPayload(::Service *fwd, s32 sockfd, const sf::OutAutoSelectBuffer &message,
+                                sf::Out<s32> &ret, sf::Out<s32> &bsd_errno, const char *tag) {
+            if (!IsGameRecvSocket(fwd, sockfd)) {
+                return false;
+            }
+            WaitForGameRx();
+
+            size_t out_len = 0;
+            if (!GameRx::Pop(nullptr, nullptr, message.GetPointer(), message.GetSize(), std::addressof(out_len))) {
+                return false;
+            }
+            ret.SetValue(static_cast<s32>(out_len));
+            bsd_errno.SetValue(0);
+
+            static std::atomic<u32> s_served{0};
+            const u32 vn = s_served.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (ShouldLogCapped(vn)) {
+                LogFormat("diag %s SERVED #%u fd %d len %zu", tag, vn, sockfd, out_len);
+            }
+            return true;
+        }
+
     }
 
     Result BsdMitmService::Select(sf::Out<s32> ret, sf::Out<s32> bsd_errno, BsdSelectInData in_data, sf::InAutoSelectBuffer rd_in, sf::InAutoSelectBuffer wr_in, sf::InAutoSelectBuffer ex_in, sf::OutAutoSelectBuffer rd_out, sf::OutAutoSelectBuffer wr_out, sf::OutAutoSelectBuffer ex_out) {
+        /* DIAG: which wait primitive does the game use? */
+        if (relay::IsEnabled()) {
+            static std::atomic<u32> s_sel{0};
+            const u32 sn = s_sel.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (ShouldLogCapped(sn)) {
+                LogFormat("diag Select #%u nfds %d hasdata %d gamefd %d rd_in %zu rd_out %zu",
+                    sn, in_data.nfds, static_cast<int>(GameRx::HasData()), GameRx::GameFd(),
+                    rd_in.GetSize(), rd_out.GetSize());
+            }
+        }
+
+        /* Wake for a queued relay frame, the select() counterpart of the Poll
+           intercept: the real socket never becomes readable (peer traffic
+           arrives via the relay), so a game that waits in select() would never
+           call recvfrom and would stall while frames pile up in the queue.
+           fd_set bit N lives at byte N/8, bit N%8 (little-endian). */
+        if (relay::IsEnabled() && GameRx::HasData()) {
+            const s32 gfd = GameRx::GameFd();
+            const size_t byte_idx = (gfd >= 0) ? static_cast<size_t>(gfd) / 8 : 0;
+            const u8 bit_mask = static_cast<u8>(1u << (static_cast<u32>(gfd) % 8));
+            if (gfd >= 0 && gfd < in_data.nfds &&
+                rd_in.GetSize() > byte_idx && rd_out.GetSize() > byte_idx) {
+                const auto *rin = static_cast<const u8 *>(rd_in.GetPointer());
+                if (rin[byte_idx] & bit_mask) {
+                    /* Re-issue with a zero timeout for the other fds' real
+                       readiness, then add ours. */
+                    BsdSelectInData in = in_data;
+                    in.is_null = 0;
+                    in.tv_sec  = 0;
+                    in.tv_usec = 0;
+                    BsdOutData out = {};
+                    ::Service *fwd = this->m_forward_service.get();
+                    R_TRY((serviceDispatchInOut(fwd, 5, in, out,
+                        .buffer_attrs = {
+                            SfBufferAttr_HipcAutoSelect | SfBufferAttr_In,
+                            SfBufferAttr_HipcAutoSelect | SfBufferAttr_In,
+                            SfBufferAttr_HipcAutoSelect | SfBufferAttr_In,
+                            SfBufferAttr_HipcAutoSelect | SfBufferAttr_Out,
+                            SfBufferAttr_HipcAutoSelect | SfBufferAttr_Out,
+                            SfBufferAttr_HipcAutoSelect | SfBufferAttr_Out,
+                        },
+                        .buffers = {
+                            { rd_in.GetPointer(),  rd_in.GetSize()  },
+                            { wr_in.GetPointer(),  wr_in.GetSize()  },
+                            { ex_in.GetPointer(),  ex_in.GetSize()  },
+                            { rd_out.GetPointer(), rd_out.GetSize() },
+                            { wr_out.GetPointer(), wr_out.GetSize() },
+                            { ex_out.GetPointer(), ex_out.GetSize() },
+                        },
+                    )));
+                    if (out.ret >= 0) {
+                        auto *rout = static_cast<u8 *>(rd_out.GetPointer());
+                        if ((rout[byte_idx] & bit_mask) == 0) {
+                            rout[byte_idx] |= bit_mask;
+                            out.ret += 1;
+                        }
+                        static std::atomic<u32> s_wake{0};
+                        const u32 wn = s_wake.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (ShouldLogCapped(wn)) {
+                            LogFormat("diag Select WAKE #%u fd %d ret %d", wn, gfd, out.ret);
+                        }
+                    }
+                    ret.SetValue(out.ret);
+                    bsd_errno.SetValue(out.bsd_errno);
+                    R_SUCCEED();
+                }
+            }
+        }
+
         /* Bounded (and sane) timeout: forward the original request verbatim.
            tv_sec is checked on its own first so a large value cannot overflow
            the ms conversion. */
@@ -141,6 +277,16 @@ namespace ams::mitm::ldn {
     }
 
     Result BsdMitmService::Poll(sf::Out<s32> ret, sf::Out<s32> bsd_errno, u32 nfds, s32 timeout, sf::InAutoSelectBuffer fds_in, sf::OutAutoSelectBuffer fds_out) {
+        /* DIAG: which wait primitive does the game use? */
+        if (relay::IsEnabled()) {
+            static std::atomic<u32> s_pl{0};
+            const u32 pn = s_pl.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (ShouldLogCapped(pn)) {
+                LogFormat("diag Poll #%u nfds %u timeout %d hasdata %d gamefd %d",
+                    pn, nfds, timeout, static_cast<int>(GameRx::HasData()), GameRx::GameFd());
+            }
+        }
+
         /* Queued relay frame + game polling its session fd: re-poll with
            timeout 0 for real readiness on the other fds, then force POLLIN on
            the game fd so it proceeds to RecvFrom. Peer traffic arrives via the
@@ -253,31 +399,28 @@ namespace ams::mitm::ldn {
         /* Serve a queued relay peer frame with the peer's real source address
            (the stack can't deliver a spoofed source locally). Otherwise
            forward verbatim, leaving unrelated recv traffic untouched. */
+        /* DIAG: is the game draining our queue at all? Logged on every call
+           while the relay is on, so a game that never calls recvfrom (e.g. it
+           uses recv() on a connected socket) shows up as silence here even
+           though inject/PUSH keeps firing. */
+        if (relay::IsEnabled()) {
+            static std::atomic<u32> s_recv{0};
+            const u32 rn = s_recv.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (ShouldLogCapped(rn)) {
+                LogFormat("diag RecvFrom #%u fd %d gamefd %d hasdata %d peek %d addrlen %zu",
+                    rn, sockfd, GameRx::GameFd(), static_cast<int>(GameRx::HasData()),
+                    static_cast<int>((flags & MSG_PEEK) != 0), src_addr.GetSize());
+            }
+        }
+
+        /* Serve the socket whose bound port matches the relay frames' target
+           port, not one fd latched from the send path. */
         if (relay::IsEnabled() &&
             (flags & MSG_PEEK) == 0 &&               /* don't consume on a peek */
             src_addr.GetSize() >= sizeof(struct sockaddr_in) &&
-            GameRx::HasData()) {                     /* peer frames are waiting */
+            IsGameRecvSocket(this->m_forward_service.get(), sockfd)) {
 
-            /* Latch the game fd from the receive side (a joiner never
-               broadcasts first, so SendTo can't record it) - but only when
-               this socket's bound port matches the queued frame's dst port, so
-               a second game socket (voice, discovery) is never mis-latched. On
-               any mismatch or getsockname failure, forward verbatim. */
-            if (GameRx::GameFd() < 0) {
-                u16 bound_port = 0;
-                if (GetForwardBoundPort(this->m_forward_service.get(), sockfd, std::addressof(bound_port)) &&
-                    bound_port != 0 && bound_port == GameRx::PeekDport()) {
-                    GameRx::SetGameFd(sockfd);
-                    LogFormat("bsd RecvFrom: bootstrapped game fd %d (bound port %u) from recv", sockfd, bound_port);
-                } else {
-                    LogFormat("bsd RecvFrom: fd %d bound port %u != queued dport %u, not latching",
-                        sockfd, bound_port, GameRx::PeekDport());
-                }
-            }
-
-            if (sockfd != GameRx::GameFd()) {
-                R_RETURN(sm::mitm::ResultShouldForwardToSession());
-            }
+            WaitForGameRx();
 
             /* Pop straight into the IPC buffer: Pop already clamps to max_len. */
             u32 src_ip = 0; u16 sport = 0; size_t out_len = 0;
@@ -292,8 +435,60 @@ namespace ams::mitm::ldn {
                 bsd_errno.SetValue(0);
                 addrlen.SetValue(static_cast<u32>(sizeof(sa)));
 
+                {
+                    static std::atomic<u32> s_served{0};
+                    const u32 vn = s_served.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (ShouldLogCapped(vn)) {
+                        LogFormat("diag RecvFrom SERVED #%u fd %d src %08x:%u len %zu", vn, sockfd, src_ip, sport, out_len);
+                    }
+                }
+
                 R_SUCCEED();
             }
+        }
+
+        R_RETURN(sm::mitm::ResultShouldForwardToSession());
+    }
+
+    Result BsdMitmService::Recv(sf::Out<s32> ret, sf::Out<s32> bsd_errno, s32 sockfd, u32 flags, sf::OutAutoSelectBuffer message) {
+        /* recv() counterpart of RecvFrom: same relay queue, minus the source
+           address (a real recv does not report one either). Games that receive
+           this way would otherwise block forever on a socket that, in relay
+           mode, never sees a peer datagram - which is exactly why local play
+           worked and cross-network play did not: on one LAN the peer's packets
+           really do arrive on the socket. */
+        if (relay::IsEnabled()) {
+            static std::atomic<u32> s_recv{0};
+            const u32 rn = s_recv.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (ShouldLogCapped(rn)) {
+                LogFormat("diag Recv #%u fd %d gamefd %d hasdata %d peek %d",
+                    rn, sockfd, GameRx::GameFd(), static_cast<int>(GameRx::HasData()),
+                    static_cast<int>((flags & MSG_PEEK) != 0));
+            }
+        }
+
+        if (relay::IsEnabled() && (flags & MSG_PEEK) == 0 &&
+            ServeQueuedPayload(this->m_forward_service.get(), sockfd, message, ret, bsd_errno, "Recv")) {
+            R_SUCCEED();
+        }
+
+        R_RETURN(sm::mitm::ResultShouldForwardToSession());
+    }
+
+    Result BsdMitmService::Read(sf::Out<s32> ret, sf::Out<s32> bsd_errno, s32 sockfd, sf::OutAutoSelectBuffer message) {
+        /* read() on the session socket: same relay queue as Recv. */
+        if (relay::IsEnabled()) {
+            static std::atomic<u32> s_rd{0};
+            const u32 rn = s_rd.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (ShouldLogCapped(rn)) {
+                LogFormat("diag Read #%u fd %d gamefd %d hasdata %d",
+                    rn, sockfd, GameRx::GameFd(), static_cast<int>(GameRx::HasData()));
+            }
+        }
+
+        if (relay::IsEnabled() &&
+            ServeQueuedPayload(this->m_forward_service.get(), sockfd, message, ret, bsd_errno, "Read")) {
+            R_SUCCEED();
         }
 
         R_RETURN(sm::mitm::ResultShouldForwardToSession());
@@ -319,6 +514,19 @@ namespace ams::mitm::ldn {
 
                 const bool is_bcast = (ip == 0xFFFFFFFFu) || (snap.active && ip == snap.bcast_ip);
 
+                /* DIAG: what the game actually sends, and whether we relay it.
+                   Rate-limited - game traffic is high rate and logging is a
+                   synchronous SD write. */
+                {
+                    static std::atomic<u32> s_sendto{0};
+                    const u32 sn = s_sendto.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (ShouldLogCapped(sn)) {
+                        LogFormat("diag SendTo #%u fd %d dst %08x:%u len %zu bcast %d | active %d peers %d bcast_ip %08x",
+                            sn, sockfd, ip, port, message.GetSize(), static_cast<int>(is_bcast),
+                            static_cast<int>(snap.active), snap.peer_count, snap.bcast_ip);
+                    }
+                }
+
                 /* Internet relay, unicast: games that switch from a broadcast
                    handshake to unicast target a peer IP unroutable across the
                    internet, so relay it (routed to the client owning that dst). */
@@ -326,6 +534,7 @@ namespace ams::mitm::ldn {
                     for (int i = 0; i < snap.peer_count; i++) {
                         if (ip == snap.peer_ips[i]) {
                             GameRx::SetGameFd(sockfd);
+                            GameRx::NoteSessionPort(port);
                             relay::BridgeSendGameUnicast(message.GetPointer(), message.GetSize(), port, ip);
                             break;
                         }
@@ -367,6 +576,7 @@ namespace ams::mitm::ldn {
                        intercept. */
                     if (want_relay) {
                         GameRx::SetGameFd(sockfd);
+                        GameRx::NoteSessionPort(port);
                         relay::BridgeSendGameBroadcast(message.GetPointer(), message.GetSize(), port);
                     }
                 }
