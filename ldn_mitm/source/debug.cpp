@@ -50,6 +50,28 @@ namespace ams::log
         s64 LogOffset;
 
         os::Mutex g_file_log_lock(true);
+
+        /* The log file can vanish under a running session - deleted over FTP,
+           SD card hiccup - and a diagnostic must never take the sysmodule
+           down, so recreate it and give up quietly if even that fails. */
+        bool OpenLog()
+        {
+            if (R_SUCCEEDED(fs::OpenFile(&LogFile, LogFilePath, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
+                return true;
+            }
+            if (R_FAILED(fs::CreateFile(LogFilePath, 0))) {
+                return false;
+            }
+            LogOffset = 0;
+            return R_SUCCEEDED(fs::OpenFile(&LogFile, LogFilePath, fs::OpenMode_Write | fs::OpenMode_AllowAppend));
+        }
+
+        void WriteLog(const void *buf, size_t len, fs::WriteOption option)
+        {
+            if (R_SUCCEEDED(fs::WriteFile(LogFile, LogOffset, buf, len, option))) {
+                LogOffset += len;
+            }
+        }
     }
 
     Result Initialize()
@@ -92,8 +114,7 @@ namespace ams::log
                                    os::GetThreadPriority(thread) + 28,
                                    os::GetThreadCurrentPriority(thread) + 28);
 
-        R_ABORT_UNLESS(fs::WriteFile(LogFile, LogOffset, buf, len, fs::WriteOption::None));
-        LogOffset += len;
+        WriteLog(buf, len, fs::WriteOption::None);
     }
 
     void LogStr(const char *fmt, std::va_list args)
@@ -102,13 +123,15 @@ namespace ams::log
         {
             std::scoped_lock lk(g_file_log_lock);
             BACKUP_TLS();
-            R_ABORT_UNLESS(fs::OpenFile(&LogFile, LogFilePath, fs::OpenMode_Write | fs::OpenMode_AllowAppend));
+            if (!OpenLog()) {
+                RESTORE_TLS();
+                return;
+            }
 
             LogPrefix();
             char buf[0x100];
             int len = util::TVSNPrintf(buf, sizeof(buf), fmt, args);
-            R_ABORT_UNLESS(fs::WriteFile(LogFile, LogOffset, buf, len, fs::WriteOption::Flush));
-            LogOffset += len;
+            WriteLog(buf, len, fs::WriteOption::Flush);
 
             fs::CloseFile(LogFile);
             RESTORE_TLS();
@@ -123,7 +146,10 @@ namespace ams::log
             char buf[0x100];
             LogFormatImpl("Bin Log: %d (%p)\n", size, data);
             BACKUP_TLS();
-            R_ABORT_UNLESS(fs::OpenFile(&LogFile, LogFilePath, fs::OpenMode_Write | fs::OpenMode_AllowAppend));
+            if (!OpenLog()) {
+                RESTORE_TLS();
+                return;
+            }
             for (int i = 0; i < size; i += 16)
             {
                 int s = MIN(size - i, 16);
@@ -133,8 +159,7 @@ namespace ams::log
                     sprintf(buf + strlen(buf), "%02x", dat[i + j]);
                 }
                 sprintf(buf + strlen(buf), "\n");
-                R_ABORT_UNLESS(fs::WriteFile(LogFile, LogOffset, buf, strlen(buf), fs::WriteOption::Flush));
-                LogOffset += strlen(buf);
+                WriteLog(buf, strlen(buf), fs::WriteOption::Flush);
             }
             fs::CloseFile(LogFile);
             RESTORE_TLS();
