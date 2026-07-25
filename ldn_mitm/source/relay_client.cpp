@@ -19,6 +19,7 @@
 #include "nifm_manager.hpp"
 #include "session_registry.hpp"
 #include "ldnmitm_config.hpp"
+#include "tcp_relay.hpp"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -530,11 +531,14 @@ namespace ams::mitm::ldn::relay {
         }
 
         this->SendKeepalive();
+        tcprelay::Start();
         LogFormat("relay xport: open, vsrc=%08x rsrc=%08x fd=%d", m_vsrc, m_rsrc, m_fd);
         R_SUCCEED();
     }
 
     void RelayTransport::Close() {
+        /* Stop the TCP tunnel first: its pump sends through the bridge. */
+        tcprelay::Stop();
         /* Unregister the bridge first: after this no bsd thread can enter a
            send on this object, so the closes below are safe. */
         {
@@ -779,6 +783,16 @@ namespace ams::mitm::ldn::relay {
             return 0;
         }
         const u16 dport = (udp[2] << 8) | udp[3];
+        if (dport == tcprelay::TcpTunnelPort) {
+            /* TCP session tunnel (docs/tcp-relay-plan.md), not game traffic. */
+            const u8 *tp = udp + 8;
+            const size_t tlen = static_cast<size_t>((ip + iplen) - tp);
+            const u32 src = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
+            if (tlen > 0 && src != m_rsrc) {
+                tcprelay::OnTunnelFrame(src, tp, tlen);
+            }
+            return 0;
+        }
         if (dport != 11452) { /* LANDiscovery::DefaultPort */
             /* Not discovery traffic: a peer game session frame - hand it to
                the game via the RecvFrom queue. */

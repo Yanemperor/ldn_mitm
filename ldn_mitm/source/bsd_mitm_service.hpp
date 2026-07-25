@@ -64,6 +64,9 @@ namespace ams::mitm::ldn {
             /* Same again for read(): libnx bsdRead is cmd 25 with a bare s32
                fd as in-data. */
             Result Read(sf::Out<s32> ret, sf::Out<s32> bsd_errno, s32 sockfd, sf::OutAutoSelectBuffer message);
+            /* TCP session relay: redirects a connect() aimed at a relay peer
+               to a local proxy, so the stream can be tunnelled. */
+            Result Connect(sf::Out<s32> ret, sf::Out<s32> bsd_errno, s32 sockfd, sf::InAutoSelectBuffer dst_addr);
             Result SendTo(sf::Out<s32> ret, sf::Out<s32> bsd_errno, s32 sockfd, s32 flags, sf::InAutoSelectBuffer message, sf::InAutoSelectBuffer dst_addr);
     };
     static_assert(ams::mitm::ldn::IsIBsdMitmInterface<BsdMitmService>);

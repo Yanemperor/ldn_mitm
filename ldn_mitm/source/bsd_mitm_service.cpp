@@ -18,6 +18,7 @@
 #include "session_registry.hpp"
 #include "ldnmitm_config.hpp"
 #include "relay_client.hpp"
+#include "tcp_relay.hpp"
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -470,6 +471,30 @@ namespace ams::mitm::ldn {
         if (relay::IsEnabled() && (flags & MSG_PEEK) == 0 &&
             ServeQueuedPayload(this->m_forward_service.get(), sockfd, message, ret, bsd_errno, "Recv")) {
             R_SUCCEED();
+        }
+
+        R_RETURN(sm::mitm::ResultShouldForwardToSession());
+    }
+
+    Result BsdMitmService::Connect(sf::Out<s32> ret, sf::Out<s32> bsd_errno, s32 sockfd, sf::InAutoSelectBuffer dst_addr) {
+        /* TCP session relay: a connect() aimed at a relay peer can never
+           complete - across subnets that address is unroutable and the
+           console's own stack fails it before a packet exists. Hand it to the
+           proxy, which redirects the connection locally and tunnels the stream
+           (docs/tcp-relay-plan.md). Everything else is forwarded untouched. */
+        if (relay::IsEnabled() && dst_addr.GetSize() >= sizeof(struct sockaddr_in)) {
+            const auto *sa = reinterpret_cast<const struct sockaddr_in *>(dst_addr.GetPointer());
+            if (sa->sin_family == AF_INET) {
+                const u32 ip   = ntohl(sa->sin_addr.s_addr);
+                const u16 port = ntohs(sa->sin_port);
+                s32 r = 0, e = 0;
+                if (tcprelay::RedirectConnect(this->m_forward_service.get(), sockfd, ip, port,
+                                              std::addressof(r), std::addressof(e))) {
+                    ret.SetValue(r);
+                    bsd_errno.SetValue(e);
+                    R_SUCCEED();
+                }
+            }
         }
 
         R_RETURN(sm::mitm::ResultShouldForwardToSession());

@@ -46,9 +46,12 @@ namespace ams::mitm::ldn {
    - RecvFrom (9) / Recv (8) / Read (25): serve relay peer frames. Games read
      their session socket through all three, and one left unserved blocks
      forever in relay mode.
+   - Connect (14): redirect a connect aimed at a relay peer into the TCP
+     session proxy.
    Every other command is forwarded verbatim by the mitm framework.
 
    Wire layouts (libnx nx/source/services/bsd.c; note nfds is u32, NOT u64):
+     Connect(14): in { s32 sockfd }; buffers: AutoSelect-In sockaddr
      Recv   (8): in { s32 sockfd; s32 flags; }
                  buffers: AutoSelect-Out message
                  out { s32 ret; s32 bsd_errno; }  (no addrlen, unlike RecvFrom)
@@ -72,6 +75,7 @@ namespace ams::mitm::ldn {
 #define AMS_BSD_MITM_INTERFACE(C, H)                                                                                                                                                              \
     AMS_SF_METHOD_INFO(C, H, 5,  Result, Select, (ams::sf::Out<s32> ret, ams::sf::Out<s32> bsd_errno, ams::mitm::ldn::BsdSelectInData in_data, ams::sf::InAutoSelectBuffer rd_in, ams::sf::InAutoSelectBuffer wr_in, ams::sf::InAutoSelectBuffer ex_in, ams::sf::OutAutoSelectBuffer rd_out, ams::sf::OutAutoSelectBuffer wr_out, ams::sf::OutAutoSelectBuffer ex_out), (ret, bsd_errno, in_data, rd_in, wr_in, ex_in, rd_out, wr_out, ex_out)) \
     AMS_SF_METHOD_INFO(C, H, 8,  Result, Recv,   (ams::sf::Out<s32> ret, ams::sf::Out<s32> bsd_errno, s32 sockfd, u32 flags, ams::sf::OutAutoSelectBuffer message), (ret, bsd_errno, sockfd, flags, message)) \
+    AMS_SF_METHOD_INFO(C, H, 14, Result, Connect, (ams::sf::Out<s32> ret, ams::sf::Out<s32> bsd_errno, s32 sockfd, ams::sf::InAutoSelectBuffer dst_addr), (ret, bsd_errno, sockfd, dst_addr)) \
     AMS_SF_METHOD_INFO(C, H, 25, Result, Read,   (ams::sf::Out<s32> ret, ams::sf::Out<s32> bsd_errno, s32 sockfd, ams::sf::OutAutoSelectBuffer message), (ret, bsd_errno, sockfd, message)) \
     AMS_SF_METHOD_INFO(C, H, 6,  Result, Poll,   (ams::sf::Out<s32> ret, ams::sf::Out<s32> bsd_errno, u32 nfds, s32 timeout, ams::sf::InAutoSelectBuffer fds_in, ams::sf::OutAutoSelectBuffer fds_out), (ret, bsd_errno, nfds, timeout, fds_in, fds_out)) \
     AMS_SF_METHOD_INFO(C, H, 9,  Result, RecvFrom, (ams::sf::Out<s32> ret, ams::sf::Out<s32> bsd_errno, ams::sf::Out<u32> addrlen, s32 sockfd, u32 flags, ams::sf::OutAutoSelectBuffer message, ams::sf::OutAutoSelectBuffer src_addr), (ret, bsd_errno, addrlen, sockfd, flags, message, src_addr)) \
