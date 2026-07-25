@@ -255,6 +255,11 @@ namespace ams::mitm::ldn::tcprelay {
                     if (!s->used) {
                         continue;
                     }
+                    /* poll() ran unlocked, so the slot may have been reused
+                       since the snapshot - only act if it still owns this fd. */
+                    if (is_listener[i] ? (s->listener != pfds[i].fd) : (s->sock != pfds[i].fd)) {
+                        continue;
+                    }
 
                     if (is_listener[i]) {
                         if (pfds[i].revents & POLLIN) {
@@ -459,7 +464,11 @@ namespace ams::mitm::ldn::tcprelay {
                     return;
                 }
                 if (s->pending_len + data_len > PendingMax) {
-                    LogFormat("tcprelay: stream %u pending overflow, dropping", h.stream);
+                    /* Dropping mid-stream bytes would corrupt the stream;
+                       close it instead - games handle a dead connection. */
+                    LogFormat("tcprelay: stream %u pending overflow, closing", h.stream);
+                    SendTunnel(s->peer_ip, TunnelClose, s->id, 0, nullptr, 0, OwnerOf(s));
+                    Release(s);
                     return;
                 }
                 std::memcpy(s->pending + s->pending_len, data, data_len);
