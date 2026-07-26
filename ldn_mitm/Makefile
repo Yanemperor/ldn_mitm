@@ -16,9 +16,13 @@ TARGET_VERSION := $(shell git describe --tags)$(shell git diff --quiet --ignore-
 #---------------------------------------------------------------------------------
 VERSION_DEFINES	:= -DGITDESCVER="\"${TARGET_VERSION}\""
 
+# Escape hatch for bisecting codegen problems without editing this file, e.g.
+#   make -j8 EXTRA_FLAGS="-fno-strict-aliasing"
+# Passed to both C and C++; command-line assignment reaches the sub-makes.
+EXTRA_FLAGS	?=
 
-CFLAGS		+= $(VERSION_DEFINES)
-CXXFLAGS	+= $(VERSION_DEFINES)
+CFLAGS		+= $(VERSION_DEFINES) $(EXTRA_FLAGS)
+CXXFLAGS	+= $(VERSION_DEFINES) $(EXTRA_FLAGS)
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional

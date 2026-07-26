@@ -16,6 +16,13 @@
 #enabled=1          internet relay on at boot
 #broadcast=1        bsd broadcast relay (the lag fix; on by default)
 #selected=my-pc     which server from the list below is active (by name)
+#id=41237           this console's address on the relay (10.13.x.x), picked at
+#                   random the first time the relay is used. Leave it alone
+#                   unless another player happens to draw the same number -
+#                   then change one of them. Values whose low byte is 0 or 255
+#                   (multiples of 256, and 255/511/767/...) and 9472-9727
+#                   (10.13.37.x, popular with lan-play users) are rejected and
+#                   redrawn; anything else from 1 to 65534 works.
 
 my-pc        82.65.234.243:11455
 lan-play     104.238.152.86
