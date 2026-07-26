@@ -41,6 +41,21 @@ namespace ams::mitm::ldn::relay {
         constexpr u8 TypeIpv4      = 0x01;
         constexpr u8 TypePing      = 0x02; /* server echoes first 4 bytes back */
         constexpr u8 TypeIpv4Frag  = 0x03;
+        /* ldn_mitm extension understood by tools/relay_server.py: 4-byte BE
+           session token; the server then keeps other sessions' game traffic
+           away from us. Far from lan-play's 0x00-0x05 so a stock server just
+           ignores it. */
+        constexpr u8 TypeScope     = 0x20;
+
+        /* IP header id of our wrapped frames - the receiver dispatches on it. */
+        constexpr u16 IpIdControl = 0x4243;   /* "BC": LANDiscovery packets   */
+        constexpr u16 IpIdGame    = 0x474D;   /* "GM": legacy, real-IP routed */
+        constexpr u16 IpIdGameV2  = 0x474E;   /* "GN": vsrc routed, real IPs
+                                                 in an 8-byte payload shim    */
+        /* IpIdGameV2 shim: real src + real dst, big-endian, ahead of the game
+           payload. The relay routes by the outer (virtual) addresses; the
+           receiving console restores these for its game. */
+        constexpr size_t GameShimLen = 8;
 
         /* Largest game datagram we carry: a full 1500-MTU UDP payload. Wrapped
            it exceeds one 1500-byte relay frame by a byte, so anything over
@@ -76,6 +91,13 @@ namespace ams::mitm::ldn::relay {
            until the user explicitly turns it on and picks a server. */
         std::atomic_int  g_selected{0};
         std::atomic_bool g_enabled{false};
+        /* Low 16 bits of our virtual relay address (10.13.x.x), which is how
+           the relay tells its clients apart. Random and persisted rather than
+           derived from our IP: two consoles on different networks routinely
+           share the last two octets of their addresses (192.168.1.10 is not a
+           rare draw), and identical virtual addresses make the relay unable to
+           route between them. 0 = not yet assigned. */
+        std::atomic<u16> g_client_id{0};
     }
 
     namespace {
@@ -99,7 +121,18 @@ namespace ams::mitm::ldn::relay {
         bool IsDirectiveLine(const char *l) {
             return DirectiveValue(l, "enabled")   != nullptr ||
                    DirectiveValue(l, "broadcast") != nullptr ||
-                   DirectiveValue(l, "selected")  != nullptr;
+                   DirectiveValue(l, "selected")  != nullptr ||
+                   DirectiveValue(l, "id")        != nullptr;
+        }
+
+        /* An id we never draw and reject from the config: low octet 255 is a
+           directed broadcast to the relay server (a unicast to 10.13.x.255
+           would be sprayed at every client), low octet 0 confuses classful
+           tooling, and 10.13.37.x is the lan-play community's favorite
+           hand-picked range - the one region where a random draw still meets
+           humans. A rejected configured id is re-drawn and persisted. */
+        bool BadClientId(u16 id) {
+            return id == 0 || (id & 0xFF) == 0xFF || (id & 0xFF) == 0x00 || (id >> 8) == 37;
         }
 
         /* Read relay.cfg into buf (NUL-terminated; empty on any failure). */
@@ -129,10 +162,14 @@ namespace ams::mitm::ldn::relay {
            (rewritten by PersistConfig whenever a toggle changes):
              enabled=0/1     internet relay on at boot
              broadcast=0/1   bsd broadcast->unicast relay
-             selected=NAME   which server from the list is active */
+             selected=NAME   which server from the list is active
+             id=N            our virtual relay address (10.13.x.x); assigned
+                             randomly on first use, edit only to resolve a
+                             collision with another player */
         g_count = 0;
         g_selected = 0;
         g_enabled = false;
+        g_client_id = 0;
         char pending_selected[ServerNameLen] = {};
 
         char buf[1024];
@@ -154,6 +191,13 @@ namespace ams::mitm::ldn::relay {
             }
             if (const char *v = DirectiveValue(line, "broadcast")) {
                 LdnConfig::setBroadcastRelay(std::atoi(v) != 0);
+                continue;
+            }
+            if (const char *v = DirectiveValue(line, "id")) {
+                const long n = std::strtol(v, nullptr, 10);
+                if (n > 0 && n < 0xFFFF && !BadClientId(static_cast<u16>(n))) {
+                    g_client_id = static_cast<u16>(n);
+                }
                 continue;
             }
             if (const char *v = DirectiveValue(line, "selected")) {
@@ -228,6 +272,10 @@ namespace ams::mitm::ldn::relay {
             char out[1280];
             size_t pos = static_cast<size_t>(std::snprintf(out, sizeof(out), "enabled=%d\nbroadcast=%d\n",
                 g_enabled.load() ? 1 : 0, LdnConfig::getBroadcastRelay() ? 1 : 0));
+            if (const u16 id = g_client_id.load(); id != 0) {
+                pos += static_cast<size_t>(std::snprintf(out + pos, sizeof(out) - pos,
+                    "id=%u\n", id));
+            }
             const int sel = g_selected.load();
             if (sel >= 0 && sel < g_count) {
                 pos += static_cast<size_t>(std::snprintf(out + pos, sizeof(out) - pos,
@@ -265,6 +313,30 @@ namespace ams::mitm::ldn::relay {
                 LogFormat("relay: persisting settings failed (write)");
             }
             fs::CloseFile(f);
+        }
+
+        /* Assign our virtual relay address once, then keep it. Done on first
+           relay use rather than at boot so a console that never enables the
+           relay never writes to the config file. Two transports can race here
+           (host + a second session's worker): the CAS makes the first draw
+           win, so both use the same address. */
+        u16 EnsureClientId() {
+            u16 id = g_client_id.load();
+            if (id == 0) {
+                u16 fresh;
+                do {
+                    os::GenerateRandomBytes(std::addressof(fresh), sizeof(fresh));
+                } while (BadClientId(fresh));
+                u16 expected = 0;
+                if (g_client_id.compare_exchange_strong(expected, fresh)) {
+                    id = fresh;
+                    PersistConfig();
+                    LogFormat("relay: assigned virtual address 10.13.%u.%u", (id >> 8) & 0xff, id & 0xff);
+                } else {
+                    id = expected;
+                }
+            }
+            return id;
         }
     }
 
@@ -457,18 +529,13 @@ namespace ams::mitm::ldn::relay {
             svcSleepThread(500000000L); /* 0.5s */
         }
 
-        /* Virtual src 10.13.<ip3>.<ip4> from our real IP so peers tell us
-           apart; the real IP is kept too - game frames are stamped with it
-           (NodeInfo advertises it) so peers accept them as genuine LAN. */
+        /* Two identities: the real IP is what the game sees - game frames are
+           stamped with it and NodeInfo advertises it, so peers accept them as
+           genuine LAN traffic. The virtual 10.13.x.x address is only how the
+           relay tells its clients apart. */
         u32 ip = 0;
-        if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ip))) {
-            ip = ntohl(ip);
-            m_rsrc = ip;
-            m_vsrc = (10u << 24) | (13u << 16) | (((ip >> 8) & 0xff) << 8) | (ip & 0xff);
-        } else {
-            m_rsrc = 0;
-            m_vsrc = (10u << 24) | (13u << 16) | 0x0001;
-        }
+        m_vsrc = (10u << 24) | (13u << 16) | EnsureClientId();
+        m_rsrc = R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) ? ntohl(ip) : 0;
 
         /* Literal IP used directly; a hostname goes through our own DNS client.
            0 = unresolvable -> fail and fall back to local LDN. */
@@ -590,7 +657,10 @@ namespace ams::mitm::ldn::relay {
     }
 
     int RelayTransport::SendWrapped(u32 src, u32 dst, u16 sport, u16 dport, u16 ip_id, const void *payload, size_t len) {
-        u8 buf[1 + 20 + 8 + MaxWrapPayload];
+        /* +GameShimLen: an IpIdGameV2 frame carries the shim on top of a
+           full-size game payload; the fragmentation path below absorbs the
+           overshoot past one relay frame. */
+        u8 buf[1 + 20 + 8 + MaxWrapPayload + GameShimLen];
         const u16 udplen = static_cast<u16>(8 + len);
         const u16 total  = static_cast<u16>(20 + udplen);
         buf[0] = TypeIpv4;
@@ -664,7 +734,7 @@ namespace ams::mitm::ldn::relay {
             return -1;
         }
         /* vsrc -> 10.13.255.255:11452, ip id "BC". */
-        return this->SendWrapped(m_vsrc, 0x0A0DFFFFu, 11452, 11452, 0x4243, lan_packet, size);
+        return this->SendWrapped(m_vsrc, 0x0A0DFFFFu, 11452, 11452, IpIdControl, lan_packet, size);
     }
 
     int RelayTransport::SendGameBroadcast(const void *payload, size_t len, u16 dport) {
@@ -676,9 +746,73 @@ namespace ams::mitm::ldn::relay {
         if (m_fd < 0 || m_rsrc == 0 || len == 0 || len > MaxWrapPayload) {
             return -1;
         }
-        /* From our real IP to dst_ip; sport = dport (the true source port isn't
-           visible in the SendTo hook; symmetric protocols send N -> N). */
-        return this->SendWrapped(m_rsrc, dst_ip, dport, dport, 0x474D, payload, len);
+        /* Address the frame by VIRTUAL addresses whenever we can. The server
+           routes unicast by a last-writer-wins map of the outer source it
+           learns from every frame; private LAN addresses collide across NATs
+           on a shared server (two strangers at 192.168.0.106 steal each
+           other's mapping and the session goes silent mid-game), while the
+           vsrc is a random 16-bit draw. The real addresses ride in a shim so
+           the receiving console can hand its game an unchanged datagram.
+           sport = dport throughout (the true source port isn't visible in the
+           SendTo hook; symmetric protocols send N -> N). */
+        const bool bcast = (dst_ip == 0xFFFFFFFFu);
+        const u32 vdst = bcast ? 0xFFFFFFFFu : this->LookupVsrc(dst_ip);
+        if (vdst != 0) {
+            u8 shimmed[GameShimLen + MaxWrapPayload];
+            shimmed[0] = (m_rsrc >> 24) & 0xff; shimmed[1] = (m_rsrc >> 16) & 0xff;
+            shimmed[2] = (m_rsrc >> 8) & 0xff;  shimmed[3] = m_rsrc & 0xff;
+            shimmed[4] = (dst_ip >> 24) & 0xff; shimmed[5] = (dst_ip >> 16) & 0xff;
+            shimmed[6] = (dst_ip >> 8) & 0xff;  shimmed[7] = dst_ip & 0xff;
+            std::memcpy(shimmed + GameShimLen, payload, len);
+            return this->SendWrapped(m_vsrc, vdst, dport, dport, IpIdGameV2, shimmed, GameShimLen + len);
+        }
+        /* Peer vsrc unknown (mapping not learned yet): legacy real-IP frame so
+           nothing is worse than before. The mapping arrives with the peer's
+           next control packet (<= one 5s beacon away). */
+        return this->SendWrapped(m_rsrc, dst_ip, dport, dport, IpIdGame, payload, len);
+    }
+
+    void RelayTransport::LearnPeer(u32 real_ip, u32 vsrc) {
+        /* Only 10.13/16 sources are relay clients, and never map ourselves -
+           our own control broadcasts don't echo (the server excludes the
+           sender), but a foreign frame could claim our addresses. */
+        if (real_ip == 0 || real_ip == m_rsrc || vsrc == 0 || vsrc == m_vsrc ||
+            (vsrc & 0xFFFF0000u) != 0x0A0D0000u) {
+            return;
+        }
+        std::scoped_lock lk(m_peer_mutex);
+        for (auto &p : m_peers) {
+            if (p.real == real_ip) {
+                if (p.vsrc != vsrc) {
+                    LogFormat("relay: peer %08x vsrc %08x -> %08x", real_ip, p.vsrc, vsrc);
+                    p.vsrc = vsrc;
+                }
+                return;
+            }
+        }
+        LogFormat("relay: peer %08x at vsrc %08x", real_ip, vsrc);
+        m_peers[m_peer_next] = { real_ip, vsrc };
+        m_peer_next = (m_peer_next + 1) % PeerMapMax;
+    }
+
+    u32 RelayTransport::LookupVsrc(u32 real_ip) const {
+        std::scoped_lock lk(m_peer_mutex);
+        for (const auto &p : m_peers) {
+            if (p.real == real_ip) {
+                return p.vsrc;
+            }
+        }
+        return 0;
+    }
+
+    int RelayTransport::SendScope(u32 token) {
+        if (m_fd < 0) {
+            return -1;
+        }
+        const u8 p[5] = { TypeScope,
+            static_cast<u8>((token >> 24) & 0xff), static_cast<u8>((token >> 16) & 0xff),
+            static_cast<u8>((token >> 8) & 0xff),  static_cast<u8>(token & 0xff) };
+        return send(m_fd, p, sizeof(p), 0);
     }
 
     void RelayTransport::InjectGameFrame(const u8 *ip, size_t iplen) {
@@ -692,17 +826,29 @@ namespace ams::mitm::ldn::relay {
         const u8 *udp = ip + ihl;
         const u16 sport = (udp[0] << 8) | udp[1];
         const u16 dport = (udp[2] << 8) | udp[3];
+        const u16 ip_id = (static_cast<u16>(ip[4]) << 8) | ip[5];
         const u8 *payload = udp + 8;
-        const size_t plen = (ip + iplen) - payload;
-        if (plen == 0 || plen > MaxWrapPayload) {
-            return;
-        }
-        const u32 src = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
+        size_t plen = (ip + iplen) - payload;
+        u32 src = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
 
         /* DIAG: a peer game frame reached us - record why it is kept/dropped. */
         static std::atomic<u32> s_inject{0};
         const u32 in = s_inject.fetch_add(1, std::memory_order_relaxed) + 1;
         const bool diag = (in <= 8 || (in % 256) == 0);
+
+        /* Vsrc-addressed frame: the outer addresses are virtual (relay
+           routing only); the sender's real addresses ride in the shim. */
+        if (ip_id == IpIdGameV2) {
+            if (plen <= GameShimLen || src == m_vsrc) {
+                return;
+            }
+            src = (static_cast<u32>(payload[0]) << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
+            payload += GameShimLen;
+            plen -= GameShimLen;
+        }
+        if (plen == 0 || plen > MaxWrapPayload) {
+            return;
+        }
 
         /* Our own frame echoed back by the relay - never feed the game its own
            traffic. */
@@ -717,9 +863,33 @@ namespace ams::mitm::ldn::relay {
             if (diag) { LogFormat("diag inject #%u DROP session-inactive src %08x dport %u", in, src, dport); }
             return;
         }
+        /* And only from consoles that are actually in our session: a shared
+           public relay broadcasts every session's game traffic to every
+           client (a busy server delivers dozens of foreign packets per
+           second), and a unicast can reach the wrong console after a
+           server-side mapping collision. Never feed any of it to the game. */
+        bool from_peer = false;
+        for (int i = 0; i < snap.peer_count && !from_peer; i++) {
+            from_peer = (snap.peer_ips[i] == src);
+        }
+        if (!from_peer) {
+            /* Foreign traffic is the whole point of this filter, and on a busy
+               public server it is the rare-but-critical event - count every
+               drop unconditionally (the sampled line alone misses most of them,
+               so a quiet log could mean "filter never fired" OR "fired but not
+               sampled"). Emit the running total on the sample cadence so one
+               line always shows the true count. */
+            static std::atomic<u32> s_notpeer{0};
+            const u32 nd = s_notpeer.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (diag || (nd & (nd - 1)) == 0) {   /* also at each power of two */
+                LogFormat("diag inject #%u DROP not-peer src %08x dport %u (total %u)", in, src, dport, nd);
+            }
+            return;
+        }
 
         if (diag) {
-            LogFormat("diag inject #%u PUSH src %08x sport %u dport %u len %zu", in, src, sport, dport, plen);
+            LogFormat("diag inject #%u PUSH src %08x sport %u dport %u len %zu%s",
+                in, src, sport, dport, plen, ip_id == IpIdGameV2 ? " (v2)" : "");
         }
         /* The stack can't deliver a peer's source IP locally, so hand the frame
            to the bsd:u RecvFrom queue, which serves it with the real source. */
@@ -835,10 +1005,30 @@ namespace ams::mitm::ldn::relay {
         if (dport == tcprelay::TcpTunnelPort) {
             /* TCP session tunnel (docs/tcp-relay-plan.md), not game traffic. */
             const u8 *tp = udp + 8;
-            const size_t tlen = static_cast<size_t>((ip + iplen) - tp);
-            const u32 src = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
+            size_t tlen = static_cast<size_t>((ip + iplen) - tp);
+            const u16 ip_id = (static_cast<u16>(ip[4]) << 8) | ip[5];
+            u32 src = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
+            if (ip_id == IpIdGameV2) {
+                if (tlen <= GameShimLen || src == m_vsrc) {
+                    return 0;
+                }
+                src = (static_cast<u32>(tp[0]) << 24) | (tp[1] << 16) | (tp[2] << 8) | tp[3];
+                tp += GameShimLen;
+                tlen -= GameShimLen;
+            }
+            /* Same gate as InjectGameFrame: tunnel streams only ever belong to
+               consoles in our session; a shared relay delivers strangers'
+               tunnel frames too, and stream ids are guessable. */
             if (tlen > 0 && src != m_rsrc) {
-                tcprelay::OnTunnelFrame(src, tp, tlen);
+                SessionRegistry::Snapshot snap;
+                SessionRegistry::Get(&snap);
+                bool from_peer = false;
+                for (int i = 0; snap.active && i < snap.peer_count && !from_peer; i++) {
+                    from_peer = (snap.peer_ips[i] == src);
+                }
+                if (from_peer) {
+                    tcprelay::OnTunnelFrame(src, tp, tlen);
+                }
             }
             return 0;
         }

@@ -139,6 +139,7 @@ namespace ams::mitm::ldn {
         if (n <= 0) {
             return n;
         }
+        this->lastSrc = src;
         if (addr) {
             addr->sin_family = AF_INET;
             addr->sin_port = htons(11452);
@@ -181,6 +182,9 @@ namespace ams::mitm::ldn {
                     if (size != sizeof(*info)) {
                         break;
                     }
+                    /* The advertisement pairs the host's real IP (nodes[0])
+                       with its virtual relay address (the outer source). */
+                    this->transport.LearnPeer(info->ldn.nodes[0].ipv4Address, this->lastSrc);
                     std::scoped_lock lock(this->discovery->dataMutex);
                     /* The host beacons its advertisement every 5s; while we
                        are joining/joined to that network it doubles as the
@@ -205,6 +209,7 @@ namespace ams::mitm::ldn {
                     if (size != sizeof(*info)) {
                         break;
                     }
+                    this->transport.LearnPeer(info->ipv4Address, this->lastSrc);
                     if (this->discovery->getState() == CommState::AccessPointCreated) {
                         LogFormat("relay: got Connect from %08x", info->ipv4Address);
                         this->discovery->onRelayConnect(info);
@@ -219,6 +224,8 @@ namespace ams::mitm::ldn {
                     if (size != sizeof(*info)) {
                         break;
                     }
+                    /* Sent by the host: nodes[0] is its real IP. */
+                    this->transport.LearnPeer(info->ldn.nodes[0].ipv4Address, this->lastSrc);
                     if (this->discovery->getState() == CommState::Station ||
                         this->discovery->getState() == CommState::StationConnected) {
                         LogFormat("relay: got SyncNetwork");
@@ -234,6 +241,9 @@ namespace ams::mitm::ldn {
                     if (size != sizeof(*hb)) {
                         break;
                     }
+                    /* Keeps station->station mappings fresh too: every member
+                       sees every heartbeat (relay broadcasts reach all). */
+                    this->transport.LearnPeer(hb->ipv4, this->lastSrc);
                     if (this->discovery->getState() == CommState::AccessPointCreated) {
                         std::scoped_lock lock(this->discovery->dataMutex);
                         if (hb->bssid == this->discovery->networkInfo.common.bssid) {
@@ -242,6 +252,49 @@ namespace ams::mitm::ldn {
                                     st.getFd() < 0 &&
                                     st.nodeInfo->ipv4Address == hb->ipv4) {
                                     st.lastSeen = os::GetSystemTick();
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                case LANPacketType::RelayBye: {
+                    /* A peer left on purpose. Whose goodbye it is comes from
+                       the address: the host advertises itself as node[0]. */
+                    const RelayHeartbeatPayload *bye = (decltype(bye))data;
+                    if (size != sizeof(*bye)) {
+                        break;
+                    }
+                    const auto state = this->discovery->getState();
+                    if (state == CommState::StationConnected) {
+                        bool host_left = false;
+                        {
+                            std::scoped_lock lock(this->discovery->dataMutex);
+                            host_left = this->discovery->joinActive &&
+                                bye->bssid == this->discovery->joinBssid &&
+                                bye->ipv4 == this->discovery->networkInfo.ldn.nodes[0].ipv4Address;
+                        }
+                        if (host_left) {
+                            LogFormat("relay: host Bye (%08x), ending session", bye->ipv4);
+                            this->discovery->onDisconnectFromHost(DisconnectReason::DestroyedByUser);
+                        }
+                    } else if (state == CommState::AccessPointCreated) {
+                        bool changed = false;
+                        {
+                            std::scoped_lock lock(this->discovery->dataMutex);
+                            if (bye->bssid == this->discovery->networkInfo.common.bssid) {
+                                for (auto &st : this->discovery->stations) {
+                                    if (st.getStatus() == NodeStatus::Connected &&
+                                        st.getFd() < 0 &&
+                                        st.nodeInfo->ipv4Address == bye->ipv4) {
+                                        LogFormat("relay: station %d Bye (%08x), dropping",
+                                            st.nodeId, bye->ipv4);
+                                        st.reset();
+                                        changed = true;
+                                    }
+                                }
+                                if (changed) {
+                                    this->discovery->updateNodes();
                                 }
                             }
                         }
@@ -260,7 +313,7 @@ namespace ams::mitm::ldn {
         LogFormat("LDTcpSocket::onRead");
         const auto state = this->discovery->getState();
         if (state == CommState::Station || state == CommState::StationConnected) {
-            return this->recvPacket([&](LANPacketType type, const void *data, size_t size, ReplyFunc reply) -> int {
+            const int rc = this->recvPacket([&](LANPacketType type, const void *data, size_t size, ReplyFunc reply) -> int {
 				AMS_UNUSED(reply);
                 if (type == LANPacketType::SyncNetwork) {
                     LogFormat("SyncNetwork");
@@ -277,6 +330,11 @@ namespace ams::mitm::ldn {
 
                 return 0;
             });
+            /* A clean FIN means the host tore the network down on purpose;
+               anything else is a failure. onClose (next, via Poll) reports
+               the matching reason. */
+            this->hostClosed = (rc == LanSocketPeerClosed);
+            return rc;
         } else if (state == CommState::AccessPointCreated) {
             struct sockaddr_in addr;
             socklen_t addrlen = sizeof(addr);
@@ -299,7 +357,8 @@ namespace ams::mitm::ldn {
         /* Drop the dead socket from the poll set, else EOF keeps it readable
            and the worker loops onRead/onClose until the game finalizes. */
         this->close();
-        this->discovery->onDisconnectFromHost();
+        this->discovery->onDisconnectFromHost(
+            this->hostClosed ? DisconnectReason::DestroyedByUser : DisconnectReason::SignalLost);
     }
 
     u32 LDUdpSocket::getBroadcast() {
@@ -355,6 +414,10 @@ namespace ams::mitm::ldn {
             }
             if (present) {
                 this->setState(CommState::StationConnected);
+                /* Claim the scope now: the game starts sending immediately and
+                   a server that only hears about it on the next beacon drops
+                   everything sent meanwhile. */
+                this->sendRelayScope();
             } else {
                 LogFormat("onSyncNetwork: host has not registered us yet, still connecting");
             }
@@ -428,18 +491,81 @@ namespace ams::mitm::ldn {
         LogFormat("relay: no free station slot");
     }
 
-    void LANDiscovery::onDisconnectFromHost() {
-        LogFormat("onDisconnectFromHost state: %d", static_cast<int>(this->state));
+    namespace {
+        /* Scope token for tools/relay_server.py: FNV-1a over the 16-byte
+           session id. Random per network and shared by every member, and NOT
+           derived from anyone's IP (the bssid is), so two hosts behind the
+           same private address still get distinct scopes. 0 is reserved for
+           "no session". */
+        u32 SessionScopeToken(const NetworkInfo &info) {
+            const u8 *b = reinterpret_cast<const u8 *>(std::addressof(info.networkId.sessionId));
+            u32 h = 0x811c9dc5u;
+            for (size_t i = 0; i < sizeof(SessionId); i++) {
+                h = (h ^ b[i]) * 0x01000193u;
+            }
+            return h != 0 ? h : 1;
+        }
+    }
+
+    void LANDiscovery::sendRelayScope() {
+        /* Tell a scope-aware server which session we are in, so it stops
+           forwarding other sessions' game traffic to us (stock lan-play
+           servers ignore the message). Sent the moment a session forms as well
+           as on the beacon: waiting for the next beat leaves a window where we
+           are scoped and the peer is not, and a server that matched scopes
+           exactly dropped everything we sent during it. 0 = no session. */
+        if (!this->relay) {
+            return;
+        }
+        u32 scope = 0;
+        {
+            std::scoped_lock lock(this->dataMutex);
+            if (this->state == CommState::AccessPointCreated ||
+                this->state == CommState::StationConnected) {
+                scope = SessionScopeToken(this->networkInfo);
+            }
+        }
+        this->relay->sendScope(scope);
+    }
+
+    void LANDiscovery::sendRelayBye() {
+        if (!this->relay) {
+            return;
+        }
+        /* Sent under dataMutex like updateNodes' SyncNetwork: the transport
+           has a single owner and this is the same borrow pattern. */
+        std::scoped_lock lock(this->dataMutex);
+        RelayHeartbeatPayload bye = {};
+        if (this->state == CommState::AccessPointCreated) {
+            bye.bssid = this->networkInfo.common.bssid;
+            bye.ipv4  = this->networkInfo.ldn.nodes[0].ipv4Address;
+        } else if (this->relayJoined) {
+            bye.bssid = this->joinBssid;
+            bye.ipv4  = this->relayJoinedIp;
+        } else {
+            return;
+        }
+        LogFormat("relay: sending Bye (%08x)", bye.ipv4);
+        this->relay->send(LANPacketType::RelayBye, &bye, sizeof(bye));
+    }
+
+    void LANDiscovery::onDisconnectFromHost(DisconnectReason reason) {
+        LogFormat("onDisconnectFromHost state: %d reason: %d",
+            static_cast<int>(this->state), static_cast<int>(reason));
         if (this->state == CommState::StationConnected) {
             {
                 /* Stop heartbeating / staleness-checking a session we left. */
                 std::scoped_lock lock(this->dataMutex);
                 this->relayJoined = false;
             }
-            /* Real ldn reports why the station left the network; without
-               this the game polls GetDisconnectReason, sees None and may
-               wait forever instead of showing its error UI. */
-            this->disconnect_reason = DisconnectReason::SignalLost;
+            /* Real ldn reports why the station left the network; without this
+               the game polls GetDisconnectReason, sees None and may wait
+               forever instead of showing its error UI. The reason has to match
+               what actually happened: a host that ended the session destroyed
+               the network (DestroyedByUser), and calling that SignalLost sends
+               the game down its link-failure path - Rayman aborts outright
+               (2162-0001) when told the radio died on an orderly exit. */
+            this->disconnect_reason = reason;
             this->setState(CommState::Station);
         }
     }
@@ -911,6 +1037,10 @@ namespace ams::mitm::ldn {
                         this->relay->keepalive();
                     }
 
+                    /* Refresh the scope every beacon (also how we return to
+                       unscoped once the session ends). */
+                    this->sendRelayScope();
+
                     /* Server-path liveness (the keepalive is send-only): probe
                        with PING - the server echoes it - and reopen the
                        transport in place when the path dies (server restart,
@@ -957,7 +1087,9 @@ namespace ams::mitm::ldn {
                         if (host_lost) {
                             LogFormat("relay: host silent > %ds, disconnecting",
                                 static_cast<int>(RelayPeerTimeoutMs / 1000));
-                            this->onDisconnectFromHost();  /* SignalLost -> game error UI */
+                            /* Silence, not a goodbye: the link really is gone
+                               (a host that quits closes the session instead). */
+                            this->onDisconnectFromHost(DisconnectReason::SignalLost);
                         }
                     }
                 }
@@ -1088,6 +1220,9 @@ namespace ams::mitm::ldn {
         }
 
         this->setState(CommState::AccessPointCreated);
+        /* See onSyncNetwork: announce the scope with the network, not on the
+           next beacon. */
+        this->sendRelayScope();
 
         this->initNodeStateChange();
         node0->isConnected = 1;
@@ -1097,6 +1232,7 @@ namespace ams::mitm::ldn {
     }
 
     Result LANDiscovery::destroyNetwork() {
+        this->sendRelayBye();   /* before the teardown, while we can still send */
         SessionRegistry::Clear();
         {
             std::scoped_lock lock(this->pollMutex);
@@ -1112,6 +1248,7 @@ namespace ams::mitm::ldn {
     }
 
     Result LANDiscovery::disconnect() {
+        this->sendRelayBye();   /* tell the host now, not in 30s */
         SessionRegistry::Clear();
         {
             std::scoped_lock lock(this->pollMutex);
@@ -1174,6 +1311,7 @@ namespace ams::mitm::ldn {
             return MAKERESULT(LdnModuleId, 32);
         }
 
+        this->sendRelayBye();   /* games that skip DestroyNetwork end here */
         SessionRegistry::Clear();
         {
             std::scoped_lock lock(this->pollMutex);
@@ -1448,7 +1586,12 @@ namespace ams::mitm::ldn {
         if (this->initialized) {
             SessionRegistry::Clear();
             this->stop = true;
+            /* DIAG: WaitThread is the one unbounded wait on this path - if the
+               worker is wedged, the game's Finalize never returns and the
+               console looks frozen. Bracket it so the log says which. */
+            LogFormat("finalize: waiting for worker");
             os::WaitThread(&this->workerThread);
+            LogFormat("finalize: worker joined");
             os::DestroyThread(&this->workerThread);
             this->udp.reset();
             this->tcp.reset();
@@ -1513,6 +1656,10 @@ namespace ams::mitm::ldn {
         }
 
         originalMtu = networkProfile.ip_setting_data.mtu;
+        /* Log it: a low profile MTU makes pia-based games fail with 2618-0006
+           and is per-profile, so it differs between two otherwise identical
+           consoles - invisible in every log until it is printed here. */
+        LogFormat("profile MTU %d", originalMtu);
         /* Respect the profile MTU; only replace unusable values (0 or >1500)
            with 1500. Never clamp down: some games' session layer (pia) requires
            a large MTU and fails (2618-0006) when it is lowered. */

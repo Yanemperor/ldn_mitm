@@ -4,6 +4,7 @@
 #include <memory>
 #include <thread>
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <stdint.h>
@@ -32,10 +33,12 @@ namespace ams::mitm::ldn {
 
     class LANDiscovery;
 
-    /* Payload of LANPacketType::RelayHeartbeat. The bssid scopes the
-       heartbeat to one session (a shared relay carries other sessions'
+    /* Payload of LANPacketType::RelayHeartbeat and ::RelayBye. The bssid
+       scopes it to one session (a shared relay carries other sessions'
        broadcasts too, and private IPs can collide across NATs); ipv4 is the
-       sender's address in host byte order, matching NodeInfo::ipv4Address. */
+       sender's address in host byte order, matching NodeInfo::ipv4Address -
+       which is also how the receiver tells the host's goodbye (ipv4 == the
+       network's node[0]) from a fellow station's. */
     struct RelayHeartbeatPayload {
         MacAddress bssid;
         u8 _pad[2];
@@ -125,6 +128,10 @@ namespace ams::mitm::ldn {
     class LDTcpSocket : public TcpLanSocketBase, public Pollable {
         protected:
             LANDiscovery *discovery;
+            /* Station side: the last read saw an orderly shutdown from the
+               host (it destroyed the network) rather than a broken link.
+               Decides which DisconnectReason onClose reports. */
+            bool hostClosed = false;
         public:
             LDTcpSocket(int fd, LANDiscovery *discovery) : TcpLanSocketBase(fd), discovery(discovery) {};
             int getFd() override {
@@ -141,6 +148,11 @@ namespace ams::mitm::ldn {
         protected:
             relay::RelayTransport transport;
             LANDiscovery *discovery;
+            /* Outer (virtual) source of the frame recvfrom last delivered -
+               the sender's relay address. Valid inside onRead's dispatch;
+               paired with the real IP inside the packet it feeds the
+               transport's peer map (vsrc-addressed game frames). */
+            u32 lastSrc = 0;
             virtual u32 getBroadcast() override { return 0x0A0DFFFFu; } /* 10.13.255.255 */
             virtual ssize_t recvfrom(void *buf, size_t len, struct sockaddr_in *addr) override;
             virtual int sendto(const void *buf, size_t len, struct sockaddr_in *addr) override;
@@ -154,6 +166,8 @@ namespace ams::mitm::ldn {
             void onClose() override;
             void keepalive() { this->transport.SendKeepalive(); }
             void ping() { this->transport.SendPing(); }
+            /* Session scope for a scope-aware relay server (0 = none). */
+            void sendScope(u32 token) { this->transport.SendScope(token); }
             bool pathDead() const { return this->transport.PathDead(); }
             /* In-place server reconnect (server restart, expired NAT mapping):
                the relay protocol is connectionless and all session state lives
@@ -216,7 +230,12 @@ namespace ams::mitm::ldn {
             static void Worker(void* args);
             NifmRequest request;
             int originalMtu;
-            bool stop;
+            /* Written by the IPC thread in finalize(), read by the worker every
+               iteration. As a plain bool that is a data race, and the compiler
+               is free to hoist the load out of the loop - the worker then never
+               sees the request to stop, finalize()'s WaitThread never returns,
+               and the game hangs inside Finalize with the console wedged. */
+            std::atomic_bool stop;
             bool initialized;
             NetworkInfo networkInfo;
             /* Station side: target network for the join. Sync is accepted only
@@ -268,7 +287,18 @@ namespace ams::mitm::ldn {
             /* Relay mode: a station joined by sending Connect over the relay
                (no per-station TCP socket). */
             void onRelayConnect(const NodeInfo *info);
-            void onDisconnectFromHost();
+            /* Relay mode: announce that we are leaving the session on purpose
+               (host destroying the network, or station disconnecting), so
+               peers act now instead of waiting out the staleness timeout.
+               No-op when not in a relay session. */
+            void sendRelayBye();
+            /* Relay mode: publish which session we are in to a scope-aware
+               relay server (0 = none). Called when a session forms and on
+               every beacon. No-op when not relaying. */
+            void sendRelayScope();
+            /* reason: how the host went away - DestroyedByUser for an orderly
+               shutdown, SignalLost when the link died under us. */
+            void onDisconnectFromHost(DisconnectReason reason);
             void onNetworkInfoChanged();
 
             void updateNodes();

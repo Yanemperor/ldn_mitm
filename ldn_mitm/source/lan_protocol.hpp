@@ -10,10 +10,21 @@ enum class LANPacketType : u8 {
     /* Relay mode only: periodic station liveness signal (no TCP close exists
        there). Older builds ignore unknown types. */
     RelayHeartbeat,
+    /* Relay mode only: "I am leaving this session, on purpose" - the relay has
+       no TCP close to convey an orderly exit, so without it the other side
+       waits out the 30s staleness timeout and then reports a link failure for
+       what was a clean goodbye. Same payload as RelayHeartbeat. */
+    RelayBye,
 };
 
 typedef std::function<int(LANPacketType, const void *, size_t)> ReplyFunc;
 typedef std::function<int(LANPacketType, const void *, size_t, ReplyFunc)> MessageCallback;
+
+/* recv() on a TCP socket returned 0: the peer closed its end cleanly. Reported
+   as a distinct negative so it reaches Poll's "close this socket" path (0 alone
+   would look like "nothing to do" and leave the dead fd readable forever), and
+   so the caller can tell an orderly shutdown from a link failure. */
+constexpr int LanSocketPeerClosed = -0xFD23;
 
 class Pollable {
     public:

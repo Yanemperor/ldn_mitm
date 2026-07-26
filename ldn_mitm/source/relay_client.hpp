@@ -123,8 +123,24 @@ namespace ams::mitm::ldn {
                 int SendGameBroadcast(const void *payload, size_t len, u16 dport);
 
                 /* As SendGameBroadcast but dst = dst_ip (host order): the relay
-                   routes it to the owning peer. */
+                   routes it to the owning peer. When the peer's virtual relay
+                   address is known (LearnPeer) the frame is addressed vsrc ->
+                   vsrc with the real IPs carried in a shim, so the server
+                   never has to route by a (commonly colliding) private LAN
+                   address; otherwise falls back to the legacy real-IP frame. */
                 int SendGameUnicast(const void *payload, size_t len, u16 dport, u32 dst_ip);
+
+                /* Record a peer's real-IP <-> virtual-relay-address pair,
+                   learned by the discovery layer from the outer source of its
+                   control packets (ScanResp/Connect/SyncNetwork/heartbeat).
+                   Thread-safe; last write per real IP wins. */
+                void LearnPeer(u32 real_ip, u32 vsrc);
+
+                /* Tell a scope-aware relay server (tools/relay_server.py)
+                   which session we are in (0 = none) so it stops forwarding
+                   other sessions' game traffic to us. Stock lan-play servers
+                   ignore the unknown message type. */
+                int SendScope(u32 token);
 
             private:
                 /* Build [0x01][IPv4+UDP+payload] and send to the relay. */
@@ -158,6 +174,17 @@ namespace ams::mitm::ldn {
                 u16 m_frag_send_id = 0;
                 u32 m_vsrc = 0;
                 u32 m_rsrc = 0;   /* our REAL IP, host order */
+
+                /* real IP -> virtual relay address of session peers, filled by
+                   LearnPeer (worker thread) and read by the game send path
+                   (bsd:u IPC threads), hence the mutex. Small: one entry per
+                   console we have heard from. */
+                static constexpr int PeerMapMax = 16;
+                struct PeerAddr { u32 real; u32 vsrc; };
+                mutable os::SdkMutex m_peer_mutex;
+                PeerAddr m_peers[PeerMapMax] = {};
+                int m_peer_next = 0;   /* round-robin evict when full */
+                u32 LookupVsrc(u32 real_ip) const;
 
                 /* Ping liveness (see SendPing/PathDead). Reset by Open(). */
                 static constexpr u32 PingMaxMisses = 4;

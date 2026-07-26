@@ -18,14 +18,27 @@ It speaks lan-play's client<->server protocol: UDP, each datagram is
                          path and reconnect).
   type 0x03 IPV4_FRAG  - fragmented IPv4 for small-MTU paths; forwarded by the
                          src/dst in its 16-byte header, clients reassemble.
+  type 0x20 SCOPE      - ldn_mitm extension: [u32 BE session token]. Declares
+                         which LDN session this endpoint is in (0 = none).
+                         Game traffic (see below) is then forwarded only
+                         between endpoints sharing the token, so one shared
+                         server no longer sprays every session's packets at
+                         every client. Sent every 5s by ldn_mitm; stock
+                         lan-play clients never send it and stay unscoped.
   (other types are ignored)
 
-Routing, exactly like a real lan-play server:
-  - source-learn: map the IPv4 packet's SRC address to the UDP endpoint it
-    came from.
+Routing, lan-play semantics plus scoping:
+  - source-learn: map (sender's scope token, IPv4 SRC address) to the UDP
+    endpoint the frame came from.
   - forward by DST address:
-      broadcast (x.x.x.255 / 255.255.255.255) -> every OTHER learned client
-      unicast                                 -> the client that owns that IP
+      broadcast (x.x.x.255 / 255.255.255.255):
+        discovery frames (UDP dport 11452)   -> every OTHER learned client
+                                                (scanning must cross sessions)
+        game frames, sender scoped           -> only clients with the same token
+        game frames, sender unscoped         -> every other client (stock
+                                                lan-play behavior)
+      unicast -> the client that owns that IP under the sender's token,
+                 falling back to the unscoped table.
   - clients idle for >60s are expired.
 
 Requires only Python 3 (no dependencies).
@@ -46,7 +59,10 @@ TYPE_KEEPALIVE = 0x00
 TYPE_IPV4 = 0x01
 TYPE_PING = 0x02
 TYPE_IPV4_FRAG = 0x03
-IDLE_TIMEOUT = 60.0  # seconds before a silent client is forgotten
+TYPE_SCOPE = 0x20
+IDLE_TIMEOUT = 60.0   # seconds before a silent client is forgotten
+SCOPE_TIMEOUT = 300.0  # seconds before a stale scope declaration is forgotten
+DISCOVERY_PORT = 11452  # LANDiscovery control traffic - always crosses scopes
 
 
 def ip_str(b):
@@ -56,6 +72,16 @@ def ip_str(b):
 def is_broadcast(dst4):
     # 255.255.255.255 or a directed broadcast (last octet 255).
     return dst4 == b"\xff\xff\xff\xff" or dst4[3] == 0xFF
+
+
+def udp_dport(payload):
+    """UDP destination port of a bare IPv4 packet, or None."""
+    if len(payload) < 20:
+        return None
+    ihl = (payload[0] & 0x0F) * 4
+    if ihl < 20 or payload[9] != 17 or len(payload) < ihl + 4:
+        return None
+    return (payload[ihl + 2] << 8) | payload[ihl + 3]
 
 
 def main():
@@ -70,20 +96,49 @@ def main():
     sock.bind((args.bind, args.port))
     print(f"[relay] listening on {args.bind}:{args.port} (Ctrl-C to stop)")
 
-    # virtual-src (4 bytes) -> (udp_endpoint, last_seen)
+    # (scope token, virtual-src 4 bytes) -> (udp_endpoint, last_seen)
     clients = {}
+    # udp_endpoint -> (scope token, last_declared); absent/expired = unscoped (0)
+    scopes = {}
     # endpoints seen, so a brand-new one is announced once
     endpoints = set()
 
-    def active_endpoints(now, exclude=None):
-        """Live client endpoints (deduped, idle ones expired)."""
+    def scope_of(ep, now):
+        entry = scopes.get(ep)
+        if entry is None:
+            return 0
+        token, seen = entry
+        if now - seen > SCOPE_TIMEOUT:
+            del scopes[ep]
+            return 0
+        return token
+
+    def active_endpoints(now, exclude=None, token=None):
+        """Live client endpoints (deduped, idle ones expired). token=None means
+        every endpoint; otherwise endpoints in that scope, plus any that have
+        not declared one.
+
+        Matching unscoped endpoints too is deliberate. Peers declare their
+        scope on a timer, so for a moment after a session forms one side is
+        scoped and the other is not; requiring an exact match there silently
+        drops the sender's traffic - 70 frames went missing that way in
+        testing, right where a session handshake happens. Stock lan-play
+        clients never declare a scope at all and would otherwise be cut off
+        entirely. Scoping is a bandwidth and privacy optimisation, so failing
+        open costs a little leakage; failing closed costs the session, and the
+        receiving console drops non-session frames anyway."""
         eps = set()
-        for vsrc, (ep, seen) in list(clients.items()):
+        for key, (ep, seen) in list(clients.items()):
             if now - seen > IDLE_TIMEOUT:
-                del clients[vsrc]
+                del clients[key]
                 continue
-            if ep != exclude:
-                eps.add(ep)
+            if ep == exclude:
+                continue
+            if token is not None:
+                ep_scope = scope_of(ep, now)
+                if ep_scope != token and ep_scope != 0:
+                    continue
+            eps.add(ep)
         return eps
 
     while True:
@@ -105,9 +160,9 @@ def main():
         if msg_type == TYPE_KEEPALIVE:
             # Refresh (never learn) mappings for this endpoint - keepalives
             # carry no address.
-            for vsrc, (ep, _) in list(clients.items()):
+            for key, (ep, _) in list(clients.items()):
                 if ep == addr:
-                    clients[vsrc] = (ep, now)
+                    clients[key] = (ep, now)
             continue
 
         if msg_type == TYPE_PING:
@@ -118,41 +173,80 @@ def main():
                 pass
             continue
 
+        if msg_type == TYPE_SCOPE:
+            if len(payload) < 4:
+                continue
+            token = int.from_bytes(payload[0:4], "big")
+            prev = scope_of(addr, now)
+            scopes[addr] = (token, now)
+            if token != prev:
+                # Re-key this endpoint's learned addresses so unicast keeps
+                # working across the transition (join/leave) without waiting
+                # for its next data frame.
+                for (old_token, vsrc), (ep, seen) in list(clients.items()):
+                    if ep == addr and old_token == prev:
+                        del clients[(old_token, vsrc)]
+                        clients[(token, vsrc)] = (ep, seen)
+                if args.verbose:
+                    print(f"[relay] scope {addr[0]}:{addr[1]} {prev:#x} -> {token:#x}")
+            # Opportunistic cleanup of stale declarations.
+            if len(scopes) > 256:
+                for ep in [e for e, (_, seen) in scopes.items() if now - seen > SCOPE_TIMEOUT]:
+                    del scopes[ep]
+            continue
+
         # Route IPv4 frames by the packet's addresses, fragments by their
         # frag-header addresses (src[4] dst[4] at offsets 0/4); fragments are
         # forwarded as-is, the receiving client reassembles.
         if msg_type == TYPE_IPV4 and len(payload) >= 20:
             src4 = payload[12:16]
             dst4 = payload[16:20]
+            dport = udp_dport(payload)
         elif msg_type == TYPE_IPV4_FRAG and len(payload) >= 16:
             src4 = payload[0:4]
             dst4 = payload[4:8]
+            # Only part 0 carries the headers; treat all fragments as game
+            # traffic (discovery packets never fragment - they fit one frame).
+            dport = None
         else:
             continue
 
-        prev = clients.get(src4)
-        clients[src4] = (addr, now)
+        token = scope_of(addr, now)
+        prev = clients.get((token, src4))
+        clients[(token, src4)] = (addr, now)
         if prev is None or prev[0] != addr:
-            print(f"[relay] learn {ip_str(src4)} -> {addr[0]}:{addr[1]}")
+            print(f"[relay] learn {ip_str(src4)} (scope {token:#x}) -> {addr[0]}:{addr[1]}")
 
         if is_broadcast(dst4):
+            # Discovery must cross scopes (a scanner is not in a session yet);
+            # game traffic stays inside the sender's session. An unscoped
+            # sender (stock lan-play client) keeps the classic
+            # broadcast-to-everyone behavior.
+            if dport == DISCOVERY_PORT or token == 0:
+                targets = active_endpoints(now, exclude=addr)
+            else:
+                targets = active_endpoints(now, exclude=addr, token=token)
             sent = 0
-            for ep in active_endpoints(now, exclude=addr):
+            for ep in targets:
                 try:
                     sock.sendto(data, ep)
                     sent += 1
                 except OSError:
                     pass
             if args.verbose:
+                kind = "disc" if dport == DISCOVERY_PORT else "game"
                 print(f"[relay] bcast {ip_str(src4)} -> {ip_str(dst4)} "
-                      f"({len(payload)}B) x{sent}")
+                      f"({len(payload)}B {kind} scope {token:#x}) x{sent}")
         else:
-            owner = clients.get(dst4)
+            # Own-scope owner first; unscoped as the transition/compat
+            # fallback (a peer whose scope declaration hasn't arrived yet).
+            owner = clients.get((token, dst4)) or clients.get((0, dst4))
             if owner and owner[0] != addr:
                 try:
                     sock.sendto(data, owner[0])
                     if args.verbose:
-                        print(f"[relay] ucast {ip_str(src4)} -> {ip_str(dst4)} ({len(payload)}B)")
+                        print(f"[relay] ucast {ip_str(src4)} -> {ip_str(dst4)} "
+                              f"({len(payload)}B scope {token:#x})")
                 except OSError:
                     pass
 
