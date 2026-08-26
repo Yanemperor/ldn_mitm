@@ -34,6 +34,7 @@ extern "C" {
 
 #include "ldnmitm_service.hpp"
 #include "bsd_mitm_service.hpp"
+#include "network_mtu_manager.hpp"
 #include "relay_client.hpp"
 
 namespace ams {
@@ -275,6 +276,8 @@ namespace ams {
            mode is off unless sdmc:/ldn_mitm_relay.cfg names a relay server. */
         mitm::ldn::relay::LoadConfig();
 
+        mitm::ldn::network_mtu::Start();
+
         /* Do NOT handle sleep via a psc PmModule: an unacknowledged psc
            request across the suspend gap asserts omm (2165-0001, unwakeable
            console). Sleep is detected at wake via POLLHUP on the dead sockets
@@ -292,6 +295,7 @@ namespace ams {
         os::StartThread(&mitm::g_thread);
 
         os::WaitThread(&mitm::g_thread);
+        mitm::ldn::network_mtu::Stop();
     }
 
 }
