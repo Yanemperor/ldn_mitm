@@ -36,6 +36,7 @@ namespace ams::mitm::ldn {
             /* Internet-relay controls, driven by the Tesla overlay. */
             Result GetInternetRelay(sf::Out<u32> enabled);
             Result SetInternetRelay(u32 enabled);
+            Result SetInternetRelayEnabled(bool enabled);
             Result GetRelayServerCount(sf::Out<u32> count);
             Result GetRelayServerName(u32 index, sf::Out<RelayServerName> name);
             Result GetSelectedRelayServer(sf::Out<u32> index);

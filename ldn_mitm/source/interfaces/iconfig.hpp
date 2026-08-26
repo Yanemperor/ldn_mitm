@@ -27,6 +27,7 @@ namespace ams::mitm::ldn {
     AMS_SF_METHOD_INFO(C, H, 65010, Result, GetRelayServerCount, 	(ams::sf::Out<u32> count), 						(count))	\
     AMS_SF_METHOD_INFO(C, H, 65011, Result, GetRelayServerName, 	(u32 index, ams::sf::Out<ams::mitm::ldn::RelayServerName> name), (index, name))	\
     AMS_SF_METHOD_INFO(C, H, 65012, Result, GetSelectedRelayServer, 	(ams::sf::Out<u32> index), 					(index))	\
-    AMS_SF_METHOD_INFO(C, H, 65013, Result, SetSelectedRelayServer, 	(u32 index), 								(index))
+    AMS_SF_METHOD_INFO(C, H, 65013, Result, SetSelectedRelayServer, 	(u32 index), 								(index))	\
+    AMS_SF_METHOD_INFO(C, H, 65014, Result, SetInternetRelayEnabled, (bool enabled),                                      (enabled))
 
     AMS_SF_DEFINE_INTERFACE(ams::mitm::ldn, ILdnConfig, AMS_LDN_CONFIG, 0x14c8af2c)
