@@ -175,6 +175,13 @@ Please try the [GHA nightlies](https://github.com/dogty/ldn_mitm/actions/workflo
 
 ## Development
 
+### Build and packaging policy
+
+All development builds, CI runs, and release packages must follow the
+[authoritative build and packaging guide](docs/build/BUILD.md). In particular,
+release builds require devkitA64 GCC 15.x (GCC 16+ is prohibited) and must
+package the unchanged SD-card layout from `out/sd`.
+
 Make sure that the submodule is initialized.
 
 ```bash
@@ -205,4 +212,3 @@ You can find a copy of the license in the [LICENSE file](LICENSE).
 Exemptions:
 * The [yuzu Nintendo Switch emulator](https://github.com/yuzu-emu/yuzu) and the [Ryujinx Team and Contributors](https://github.com/orgs/Ryujinx) are exempt from GPLv2 licensing. They are permitted, each at their individual discretion, to instead license any source code authored for the ldn_mitm project as either GPLv2 or later or the [MIT license](https://github.com/Atmosphere-NX/Atmosphere/blob/master/docs/licensing_exemptions/MIT_LICENSE). In doing so, they may alter, supplement, or entirely remove the copyright notice for each file they choose to relicense. Neither the ldn_mitm project nor its individual contributors shall assert their moral rights against any of the aforementioned projects.
 * [Nintendo](https://github.com/Nintendo) is exempt from GPLv2 licensing and may (at its option) instead license any source code authored for the ldn_mitm project under the Zero-Clause BSD license.
-
