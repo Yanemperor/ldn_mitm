@@ -1,6 +1,6 @@
 /**
  * @file ldn_mitm_ipc.c
- * @brief Thin read-only IPC client for ldn_mitm.
+ * @brief Thin IPC client for ldn_mitm.
  */
 
 #include "ldn_mitm_ipc.h"
@@ -18,6 +18,7 @@ enum {
     LdnMitmCmdGetRelayServerCount = 65010,
     LdnMitmCmdGetRelayServerName = 65011,
     LdnMitmCmdGetSelectedRelayServer = 65012,
+    LdnMitmCmdSetInternetRelayEnabled = 65014,
 };
 
 static Service g_ldn_service;
@@ -95,4 +96,10 @@ bool ryuLinkLdnMitmIpcGetRelayStatus(RyuLinkLdnMitmRelayStatus *out_status) {
     memcpy(out_status->selected_server, selected_server_name, sizeof(selected_server_name));
     out_status->selected_server[sizeof(out_status->selected_server) - 1] = '\0';
     return out_status->enabled && out_status->internet_relay_enabled && out_status->selected_server[0];
+}
+
+bool ryuLinkLdnMitmIpcSetInternetRelayEnabled(bool enabled) {
+    if (!ryuLinkLdnMitmIpcInitialize()) return false;
+    return R_SUCCEEDED(serviceDispatchIn(&g_config_service,
+                                         LdnMitmCmdSetInternetRelayEnabled, enabled));
 }

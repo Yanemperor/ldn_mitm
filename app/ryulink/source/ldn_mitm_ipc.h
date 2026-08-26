@@ -1,6 +1,6 @@
 /**
  * @file ldn_mitm_ipc.h
- * @brief Read-only client for ldn_mitm's public configuration service.
+ * @brief Thin client for ldn_mitm's public configuration service.
  */
 
 #pragma once
@@ -28,3 +28,6 @@ void ryuLinkLdnMitmIpcExit(void);
  * the sysmodule and Internet Relay are enabled and a Relay server is selected.
  */
 bool ryuLinkLdnMitmIpcGetRelayStatus(RyuLinkLdnMitmRelayStatus *out_status);
+
+/** Enables or disables Internet Relay without changing other ldn_mitm settings. */
+bool ryuLinkLdnMitmIpcSetInternetRelayEnabled(bool enabled);

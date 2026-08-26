@@ -444,9 +444,15 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
     switch (action) {
         case RyuLinkPending_LoginStart: ryuLinkAuthStart(&app->auth); break;
         case RyuLinkPending_AuthRestore:
-            if (ryuLinkAuthRestore(&app->auth)) enter_lobby(app);
+            if (ryuLinkAuthRestore(&app->auth)) {
+                (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(true);
+                enter_lobby(app);
+            }
             break;
-        case RyuLinkPending_EnterLobby: enter_lobby(app); break;
+        case RyuLinkPending_EnterLobby:
+            (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(true);
+            enter_lobby(app);
+            break;
         case RyuLinkPending_RefreshRooms: refresh_rooms(app); break;
         case RyuLinkPending_GetRoom:
             if (app->room_page.count && app->selected_room < app->room_page.count &&
@@ -462,6 +468,7 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
             if (app->node_count) ryuLinkApiSetPreferredNode(&app->auth, app->nodes[app->selected_node].id);
             break;
         case RyuLinkPending_Logout:
+            (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
             ryuLinkAuthCancel(&app->auth);
             app->page = app->pending_target;
             break;
