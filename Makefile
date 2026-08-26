@@ -1,11 +1,14 @@
 KIPS := ldn_mitm
 NROS := ldnmitm_config
+RYULINK := app/ryulink
 
-SUBFOLDERS := Atmosphere-libs/libstratosphere $(KIPS) $(NROS) overlay
+SUBFOLDERS := Atmosphere-libs/libstratosphere $(KIPS) $(NROS) overlay $(RYULINK)
 
 OUTDIR		:=	out
 SD_ROOT     :=  $(OUTDIR)/sd
 NRO_DIR     :=  $(SD_ROOT)/switch/ldnmitm_config
+RYULINK_NRO_DIR := $(SD_ROOT)/switch/RyuLink
+RELAY_CONFIG_DIR := $(SD_ROOT)/config/ldn_mitm
 TITLE_DIR   :=  $(SD_ROOT)/atmosphere/contents/4200000000000010
 OVERLAY_DIR :=  $(SD_ROOT)/switch/.overlays
 
@@ -57,9 +60,13 @@ $(KIPS): Atmosphere-libs/libstratosphere
 #---------------------------------------------------------------------------------
 PACK: $(SUBFOLDERS)
 	@ mkdir -p $(NRO_DIR)
+	@ mkdir -p $(RYULINK_NRO_DIR)
+	@ mkdir -p $(RELAY_CONFIG_DIR)
 	@ mkdir -p $(TITLE_DIR)/flags
 	@ mkdir -p $(OVERLAY_DIR)
 	@ cp ldnmitm_config/ldnmitm_config.nro $(NRO_DIR)/ldnmitm_config.nro
+	@ cp $(RYULINK)/RyuLink.nro $(RYULINK_NRO_DIR)/RyuLink.nro
+	@ cp config/ldn_mitm/relay.cfg $(RELAY_CONFIG_DIR)/relay.cfg
 	@ cp ldn_mitm/ldn_mitm.nsp $(TITLE_DIR)/exefs.nsp
 	@ cp overlay/overlay.ovl $(OVERLAY_DIR)/ldnmitm_config.ovl
 	@ cp ldn_mitm/res/toolbox.json $(TITLE_DIR)/toolbox.json

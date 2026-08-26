@@ -1,0 +1,5 @@
+*.elf
+*.nro
+*.nacp
+build/
+.DS_Store
