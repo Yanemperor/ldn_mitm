@@ -1609,21 +1609,6 @@ namespace ams::mitm::ldn {
                rapid init/finalize. */
             nifmRequestClose(&request);
 
-            NifmNetworkProfileData networkProfile;
-            rc = nifmGetCurrentNetworkProfile(&networkProfile);
-            if (R_FAILED(rc))
-            {
-                LogFormat("final nifmGetCurrentProfile failed: %x", rc);
-            } else if (networkProfile.ip_setting_data.mtu != originalMtu) {
-                /* Only restore if we actually changed it, to avoid needless
-                   profile writes on every finalize. */
-                networkProfile.ip_setting_data.mtu = originalMtu;
-                rc = nifmSetNetworkProfile(&networkProfile, &networkProfile.uuid);
-                if (R_FAILED(rc)) {
-                    LogFormat("final nifmSetNetworkProfile failed: %x", rc);
-                }
-            }
-
             /* Matches the Acquire in initialize(). */
             NifmSessionManager::Release();
         }
@@ -1647,59 +1632,12 @@ namespace ams::mitm::ldn {
         }
         auto nifmGuard = SCOPE_GUARD { NifmSessionManager::Release(); };
 
-        NifmNetworkProfileData networkProfile;
-        rc = nifmGetCurrentNetworkProfile(&networkProfile);
-        if (R_FAILED(rc))
-        {
-            LogFormat("nifmGetCurrentNetworkProfile failed: %x", rc);
-            return rc;
-        }
-
-        originalMtu = networkProfile.ip_setting_data.mtu;
-        /* Log it: a low profile MTU makes pia-based games fail with 2618-0006
-           and is per-profile, so it differs between two otherwise identical
-           consoles - invisible in every log until it is printed here. */
-        LogFormat("profile MTU %d", originalMtu);
-        /* Respect the profile MTU; only replace unusable values (0 or >1500)
-           with 1500. Never clamp down: some games' session layer (pia) requires
-           a large MTU and fails (2618-0006) when it is lowered. */
-        int desiredMtu = originalMtu;
-        if (desiredMtu == 0 || desiredMtu > 1500) {
-            desiredMtu = 1500;
-        }
-
-        /* Only write the profile if the MTU actually changes; mtuChanged gates
-           the restore on failure. */
-        bool mtuChanged = false;
-        if (desiredMtu != originalMtu) {
-            networkProfile.ip_setting_data.mtu = desiredMtu;
-            rc = nifmSetNetworkProfile(&networkProfile, &networkProfile.uuid);
-            if (R_FAILED(rc)) {
-                LogFormat("nifmSetNetworkProfile failed: %x", rc);
-                return rc;
-            }
-            mtuChanged = true;
-        }
-
-        auto restoreMtu = [&]() {
-            if (!mtuChanged) {
-                return;
-            }
-            NifmNetworkProfileData p;
-            if (R_SUCCEEDED(nifmGetCurrentNetworkProfile(&p))) {
-                p.ip_setting_data.mtu = originalMtu;
-                nifmSetNetworkProfile(&p, &p.uuid);
-            }
-        };
-
         rc = nifmCreateRequest(&request, true);
         if (R_FAILED(rc))
         {
             /* nifm can transiently run out of request capacity when a game
-               rapidly cycles init/finalize (a failed session retry storm).
-               Restore state and return a clean error rather than leaking. */
+               rapidly cycles init/finalize (a failed session retry storm). */
             LogFormat("nifmCreateRequest failed: %x", rc);
-            restoreMtu();
             return rc;
         }
 
@@ -1720,7 +1658,6 @@ namespace ams::mitm::ldn {
                 LogFormat("nifmSetLocalNetworkMode failed %x", rc);
                 nifmRequestCancel(&request);
                 nifmRequestClose(&request);
-                restoreMtu();
                 return rc;
             }
         }
@@ -1731,7 +1668,6 @@ namespace ams::mitm::ldn {
             LogFormat("nifmRequestSubmitAndWait failed: %x", rc);
             nifmRequestCancel(&request);
             nifmRequestClose(&request);
-            restoreMtu();
             return rc;
         }
 
@@ -1747,7 +1683,6 @@ namespace ams::mitm::ldn {
             LogFormat("initUdp %x", rc);
             nifmRequestCancel(&request);
             nifmRequestClose(&request);
-            restoreMtu();
             return rc;
         }
 
@@ -1771,7 +1706,6 @@ namespace ams::mitm::ldn {
             this->udp.reset();
             nifmRequestCancel(&request);
             nifmRequestClose(&request);
-            restoreMtu();
             return 0xF601;
         }
 
