@@ -48,6 +48,10 @@ namespace ams::mitm::ldn {
         relay::SetRelayEnabled(enabled != 0);
         R_SUCCEED();
     }
+    Result LdnConfig::SetInternetRelayEnabled(bool enabled) {
+        relay::SetRelayEnabled(enabled);
+        R_SUCCEED();
+    }
     Result LdnConfig::GetRelayServerCount(sf::Out<u32> count) {
         count.SetValue(static_cast<u32>(relay::ServerCount()));
         R_SUCCEED();
