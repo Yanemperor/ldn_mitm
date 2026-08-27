@@ -1,0 +1,19 @@
+FROM devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
+
+# switch-dev supplies the toolchain and libnx. Its group does not include the
+# App's link-time portlibs, so list only those Makefile dependencies; curl's
+# own TLS dependencies are resolved transitively by dkp-pacman.
+RUN dkp-pacman -S --needed --noconfirm \
+    switch-dev \
+    switch-curl \
+    switch-freetype \
+    switch-bzip2 \
+    switch-zlib \
+    switch-libpng \
+    switch-harfbuzz
+
+ENV DEVKITPRO=/opt/devkitpro \
+    DEVKITA64=/opt/devkitpro/devkitA64 \
+    PATH=/opt/devkitpro/tools/bin:/opt/devkitpro/devkitA64/bin:${PATH}
+
+WORKDIR /workspace

@@ -6,3 +6,14 @@ services:
     volumes:
       - ".:/code"
     command: bash -c "dkp-pacman -Syu --noconfirm && cd /code && make -j8"
+
+  ryulink:
+    build:
+      context: .
+      dockerfile: Dockerfile.ryulink
+    volumes:
+      - ".:/workspace"
+    working_dir: /workspace
+    command: >
+      bash -c "make -C app/ryulink clean &&
+      make -C app/ryulink -j4"
