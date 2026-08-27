@@ -57,6 +57,13 @@ namespace ams::mitm::ldn {
         int  SelectedServer();
         void SelectServer(int index);
 
+        /* Relay virtual IPv4 state, in host byte order. SetVirtualIp is the
+           only active writer; zero means the caller has not configured it. */
+        constexpr Result ResultVirtualIpNotConfigured = MAKERESULT(0xFD, 103);
+        Result SetVirtualIp(u32 ip);
+        u32 GetVirtualIp();
+        Result RequireVirtualIp(u32 *out_ip = nullptr);
+
         /* Selected relay server. ServerIp is the literal IPv4 (host order) or
            0 for a hostname; ServerHost is the raw address token (RelayTransport
            resolves a hostname at connect time). Valid when IsEnabled(). */
@@ -85,8 +92,7 @@ namespace ams::mitm::ldn {
                 ~RelayTransport() { this->Close(); }
 
                 /* Acquire internet, open+register+connect the socket. The
-                   virtual src (10.13.<ip3>.<ip4>) is derived from our real IP
-                   so peers can tell us apart. */
+                   virtual src is the configured 10.13.x.x address. */
                 Result Open();
                 void Close();
                 bool IsOpen() const { return m_fd >= 0; }
@@ -172,7 +178,6 @@ namespace ams::mitm::ldn {
                 bool m_have_req = false;
                 bool m_have_nifm_session = false;
                 u16 m_frag_send_id = 0;
-                u32 m_vsrc = 0;
                 u32 m_rsrc = 0;   /* our REAL IP, host order */
 
                 /* real IP -> virtual relay address of session peers, filled by

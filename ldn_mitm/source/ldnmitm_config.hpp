@@ -41,6 +41,8 @@ namespace ams::mitm::ldn {
             Result GetRelayServerName(u32 index, sf::Out<RelayServerName> name);
             Result GetSelectedRelayServer(sf::Out<u32> index);
             Result SetSelectedRelayServer(u32 index);
+            Result SetVirtualIp(u32 ip);
+            Result GetVirtualIp(sf::Out<u32> ip);
     };
     static_assert(ams::mitm::ldn::IsILdnConfig<LdnConfig>);
 
