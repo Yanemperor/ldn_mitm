@@ -15,6 +15,7 @@
  */
 
 #include "relay_client.hpp"
+#include "virtual_ip.hpp"
 #include "debug.hpp"
 #include "nifm_manager.hpp"
 #include "session_registry.hpp"
@@ -129,7 +130,7 @@ namespace ams::mitm::ldn::relay {
            would be sprayed at every client), low octet 0 confuses classful
            tooling, and 10.13.37.x is the lan-play community's favorite
            hand-picked range - the one region where a random draw still meets
-           humans. A rejected configured id is re-drawn and persisted. */
+           humans. These constraints apply only to legacy random generation. */
         bool BadClientId(u16 id) {
             return id == 0 || (id & 0xFF) == 0xFF || (id & 0xFF) == 0x00 || (id >> 8) == 37;
         }
@@ -325,8 +326,7 @@ namespace ams::mitm::ldn::relay {
     }
 
     Result SetVirtualIp(u32 ip) {
-        const u16 id = static_cast<u16>(ip);
-        if ((ip & 0xFFFF0000u) != 0x0A0D0000u || BadClientId(id)) {
+        if (!IsServerVirtualIp(ip)) {
             LogFormat("relay: rejected virtual IP %08x", ip);
             return MAKERESULT(0xFD, 104);
         }
