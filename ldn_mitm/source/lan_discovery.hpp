@@ -229,7 +229,6 @@ namespace ams::mitm::ldn {
             std::array<u8, NodeCountMax> nodeLastStates;
             static void Worker(void* args);
             NifmRequest request;
-            int originalMtu;
             /* Written by the IPC thread in finalize(), read by the worker every
                iteration. As a plain bool that is a data race, and the compiler
                is free to hoist the load out of the loop - the worker then never
