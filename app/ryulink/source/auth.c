@@ -491,7 +491,7 @@ bool ryuLinkApiEnsureServerDevice(RyuLinkAuthSession *session, bool force_regist
         return true;
     }
     if (snprintf(body, sizeof(body), "{\"bootstrapId\":\"%s\"}", identity.device_bootstrap_id) >= (int)sizeof(body) ||
-        !request("https://api.ryulink.xyz/app-api/ryulink/devices/register", body, g_access_token, &status, &response) ||
+        !app_request("https://api.ryulink.xyz/app-api/ryulink/devices/register", "POST", body, &status, &response) ||
         !api_success(&response)) return api_error(session, status, L("Unable to register this device.", "无法注册此设备。"));
     data = strstr(response.data, "\"data\"");
     if (!data || !next_object(data, object, sizeof(object)) ||
