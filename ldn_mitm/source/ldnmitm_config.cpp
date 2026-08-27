@@ -46,6 +46,9 @@ namespace ams::mitm::ldn {
         R_SUCCEED();
     }
     Result LdnConfig::SetInternetRelay(u32 enabled) {
+        if (enabled != 0) {
+            R_TRY(relay::RequireVirtualIp());
+        }
         relay::SetRelayEnabled(enabled != 0);
         if (enabled != 0) {
             return EnsureCurrentNetworkMtu1500();
@@ -53,6 +56,9 @@ namespace ams::mitm::ldn {
         R_SUCCEED();
     }
     Result LdnConfig::SetInternetRelayEnabled(bool enabled) {
+        if (enabled) {
+            R_TRY(relay::RequireVirtualIp());
+        }
         relay::SetRelayEnabled(enabled);
         R_SUCCEED();
     }
@@ -72,6 +78,13 @@ namespace ams::mitm::ldn {
     }
     Result LdnConfig::SetSelectedRelayServer(u32 index) {
         relay::SelectServer(static_cast<int>(index));
+        R_SUCCEED();
+    }
+    Result LdnConfig::SetVirtualIp(u32 ip) {
+        return relay::SetVirtualIp(ip);
+    }
+    Result LdnConfig::GetVirtualIp(sf::Out<u32> ip) {
+        ip.SetValue(relay::GetVirtualIp());
         R_SUCCEED();
     }
 }

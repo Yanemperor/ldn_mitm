@@ -1141,12 +1141,16 @@ namespace ams::mitm::ldn {
 
     Result LANDiscovery::getNodeInfo(NodeInfo *node, const UserConfig *userConfig, u16 localCommunicationVersion) {
         u32 ipAddress;
-        Result rc = nifmGetCurrentIpAddress(&ipAddress);
-        if (R_FAILED(rc))
-        {
-            return rc;
+        Result rc;
+        if (relay::IsEnabled()) {
+            R_TRY(relay::RequireVirtualIp(&ipAddress));
+        } else {
+            rc = nifmGetCurrentIpAddress(&ipAddress);
+            if (R_FAILED(rc)) {
+                return rc;
+            }
+            ipAddress = ntohl(ipAddress);
         }
-        ipAddress = ntohl(ipAddress);
         rc = getFakeMac(&node->macAddress);
         if (R_FAILED(rc)) {
             return rc;

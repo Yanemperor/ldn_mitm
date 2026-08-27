@@ -91,13 +91,11 @@ namespace ams::mitm::ldn::relay {
            until the user explicitly turns it on and picks a server. */
         std::atomic_int  g_selected{0};
         std::atomic_bool g_enabled{false};
-        /* Low 16 bits of our virtual relay address (10.13.x.x), which is how
-           the relay tells its clients apart. Random and persisted rather than
-           derived from our IP: two consoles on different networks routinely
-           share the last two octets of their addresses (192.168.1.10 is not a
-           rare draw), and identical virtual addresses make the relay unable to
-           route between them. 0 = not yet assigned. */
-        std::atomic<u16> g_client_id{0};
+        /* The one virtual relay address (10.13.x.x), in host byte order.
+           Zero means it has not been supplied through the Core IPC. */
+        std::atomic<u32> g_virtual_ip{0};
+        constexpr bool EnableRandomVirtualIp = false;
+        static_assert(!EnableRandomVirtualIp);
     }
 
     namespace {
@@ -122,10 +120,11 @@ namespace ams::mitm::ldn::relay {
             return DirectiveValue(l, "enabled")   != nullptr ||
                    DirectiveValue(l, "broadcast") != nullptr ||
                    DirectiveValue(l, "selected")  != nullptr ||
+                   /* Legacy persisted random-IP setting: ignore and remove it. */
                    DirectiveValue(l, "id")        != nullptr;
         }
 
-        /* An id we never draw and reject from the config: low octet 255 is a
+        /* An id we never draw: low octet 255 is a
            directed broadcast to the relay server (a unicast to 10.13.x.255
            would be sprayed at every client), low octet 0 confuses classful
            tooling, and 10.13.37.x is the lan-play community's favorite
@@ -162,14 +161,10 @@ namespace ams::mitm::ldn::relay {
            (rewritten by PersistConfig whenever a toggle changes):
              enabled=0/1     internet relay on at boot
              broadcast=0/1   bsd broadcast->unicast relay
-             selected=NAME   which server from the list is active
-             id=N            our virtual relay address (10.13.x.x); assigned
-                             randomly on first use, edit only to resolve a
-                             collision with another player */
+             selected=NAME   which server from the list is active */
         g_count = 0;
         g_selected = 0;
         g_enabled = false;
-        g_client_id = 0;
         char pending_selected[ServerNameLen] = {};
 
         char buf[1024];
@@ -191,13 +186,6 @@ namespace ams::mitm::ldn::relay {
             }
             if (const char *v = DirectiveValue(line, "broadcast")) {
                 LdnConfig::setBroadcastRelay(std::atoi(v) != 0);
-                continue;
-            }
-            if (const char *v = DirectiveValue(line, "id")) {
-                const long n = std::strtol(v, nullptr, 10);
-                if (n > 0 && n < 0xFFFF && !BadClientId(static_cast<u16>(n))) {
-                    g_client_id = static_cast<u16>(n);
-                }
                 continue;
             }
             if (const char *v = DirectiveValue(line, "selected")) {
@@ -272,10 +260,6 @@ namespace ams::mitm::ldn::relay {
             char out[1280];
             size_t pos = static_cast<size_t>(std::snprintf(out, sizeof(out), "enabled=%d\nbroadcast=%d\n",
                 g_enabled.load() ? 1 : 0, LdnConfig::getBroadcastRelay() ? 1 : 0));
-            if (const u16 id = g_client_id.load(); id != 0) {
-                pos += static_cast<size_t>(std::snprintf(out + pos, sizeof(out) - pos,
-                    "id=%u\n", id));
-            }
             const int sel = g_selected.load();
             if (sel >= 0 && sel < g_count) {
                 pos += static_cast<size_t>(std::snprintf(out + pos, sizeof(out) - pos,
@@ -315,29 +299,56 @@ namespace ams::mitm::ldn::relay {
             fs::CloseFile(f);
         }
 
-        /* Assign our virtual relay address once, then keep it. Done on first
-           relay use rather than at boot so a console that never enables the
-           relay never writes to the config file. Two transports can race here
-           (host + a second session's worker): the CAS makes the first draw
-           win, so both use the same address. */
-        u16 EnsureClientId() {
-            u16 id = g_client_id.load();
-            if (id == 0) {
+        /* Retained for explicit maintenance opt-in only. The default build
+           never calls this; SetVirtualIp is the sole active state writer. */
+        [[maybe_unused]] u32 EnsureRandomVirtualIp() {
+            if constexpr (!EnableRandomVirtualIp) {
+                return 0;
+            }
+            u32 ip = g_virtual_ip.load();
+            if (ip == 0) {
                 u16 fresh;
                 do {
                     os::GenerateRandomBytes(std::addressof(fresh), sizeof(fresh));
                 } while (BadClientId(fresh));
-                u16 expected = 0;
-                if (g_client_id.compare_exchange_strong(expected, fresh)) {
-                    id = fresh;
-                    PersistConfig();
-                    LogFormat("relay: assigned virtual address 10.13.%u.%u", (id >> 8) & 0xff, id & 0xff);
+                const u32 generated = 0x0A0D0000u | fresh;
+                u32 expected = 0;
+                if (g_virtual_ip.compare_exchange_strong(expected, generated)) {
+                    ip = generated;
+                    LogFormat("relay: explicitly generated virtual address %08x", ip);
                 } else {
-                    id = expected;
+                    ip = expected;
                 }
             }
-            return id;
+            return ip;
         }
+    }
+
+    Result SetVirtualIp(u32 ip) {
+        const u16 id = static_cast<u16>(ip);
+        if ((ip & 0xFFFF0000u) != 0x0A0D0000u || BadClientId(id)) {
+            LogFormat("relay: rejected virtual IP %08x", ip);
+            return MAKERESULT(0xFD, 104);
+        }
+        g_virtual_ip = ip;
+        LogFormat("relay: virtual IP configured %08x", ip);
+        R_SUCCEED();
+    }
+
+    u32 GetVirtualIp() {
+        return g_virtual_ip.load();
+    }
+
+    Result RequireVirtualIp(u32 *out_ip) {
+        const u32 ip = GetVirtualIp();
+        if (ip == 0) {
+            LogFormat("relay: virtual IP is not configured");
+            return ResultVirtualIpNotConfigured;
+        }
+        if (out_ip != nullptr) {
+            *out_ip = ip;
+        }
+        R_SUCCEED();
     }
 
     void PersistSettings()    { PersistConfig(); }
@@ -497,6 +508,7 @@ namespace ams::mitm::ldn::relay {
     }
 
     Result RelayTransport::Open() {
+        R_TRY(RequireVirtualIp());
         /* Internet route: nifm session + request + registered socket, NOT
            LocalNetworkMode. */
         Result rc = NifmSessionManager::Acquire();
@@ -534,7 +546,6 @@ namespace ams::mitm::ldn::relay {
            genuine LAN traffic. The virtual 10.13.x.x address is only how the
            relay tells its clients apart. */
         u32 ip = 0;
-        m_vsrc = (10u << 24) | (13u << 16) | EnsureClientId();
         m_rsrc = R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) ? ntohl(ip) : 0;
 
         /* Literal IP used directly; a hostname goes through our own DNS client.
@@ -602,7 +613,7 @@ namespace ams::mitm::ldn::relay {
 
         this->SendKeepalive();
         tcprelay::Start();
-        LogFormat("relay xport: open, vsrc=%08x rsrc=%08x fd=%d", m_vsrc, m_rsrc, m_fd);
+        LogFormat("relay xport: open, vsrc=%08x rsrc=%08x fd=%d", GetVirtualIp(), m_rsrc, m_fd);
         R_SUCCEED();
     }
 
@@ -734,7 +745,7 @@ namespace ams::mitm::ldn::relay {
             return -1;
         }
         /* vsrc -> 10.13.255.255:11452, ip id "BC". */
-        return this->SendWrapped(m_vsrc, 0x0A0DFFFFu, 11452, 11452, IpIdControl, lan_packet, size);
+        return this->SendWrapped(GetVirtualIp(), 0x0A0DFFFFu, 11452, 11452, IpIdControl, lan_packet, size);
     }
 
     int RelayTransport::SendGameBroadcast(const void *payload, size_t len, u16 dport) {
@@ -764,7 +775,7 @@ namespace ams::mitm::ldn::relay {
             shimmed[4] = (dst_ip >> 24) & 0xff; shimmed[5] = (dst_ip >> 16) & 0xff;
             shimmed[6] = (dst_ip >> 8) & 0xff;  shimmed[7] = dst_ip & 0xff;
             std::memcpy(shimmed + GameShimLen, payload, len);
-            return this->SendWrapped(m_vsrc, vdst, dport, dport, IpIdGameV2, shimmed, GameShimLen + len);
+            return this->SendWrapped(GetVirtualIp(), vdst, dport, dport, IpIdGameV2, shimmed, GameShimLen + len);
         }
         /* Peer vsrc unknown (mapping not learned yet): legacy real-IP frame so
            nothing is worse than before. The mapping arrives with the peer's
@@ -776,7 +787,7 @@ namespace ams::mitm::ldn::relay {
         /* Only 10.13/16 sources are relay clients, and never map ourselves -
            our own control broadcasts don't echo (the server excludes the
            sender), but a foreign frame could claim our addresses. */
-        if (real_ip == 0 || real_ip == m_rsrc || vsrc == 0 || vsrc == m_vsrc ||
+        if (real_ip == 0 || real_ip == m_rsrc || vsrc == 0 || vsrc == GetVirtualIp() ||
             (vsrc & 0xFFFF0000u) != 0x0A0D0000u) {
             return;
         }
@@ -839,7 +850,7 @@ namespace ams::mitm::ldn::relay {
         /* Vsrc-addressed frame: the outer addresses are virtual (relay
            routing only); the sender's real addresses ride in the shim. */
         if (ip_id == IpIdGameV2) {
-            if (plen <= GameShimLen || src == m_vsrc) {
+            if (plen <= GameShimLen || src == GetVirtualIp()) {
                 return;
             }
             src = (static_cast<u32>(payload[0]) << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
@@ -1009,7 +1020,7 @@ namespace ams::mitm::ldn::relay {
             const u16 ip_id = (static_cast<u16>(ip[4]) << 8) | ip[5];
             u32 src = (ip[12] << 24) | (ip[13] << 16) | (ip[14] << 8) | ip[15];
             if (ip_id == IpIdGameV2) {
-                if (tlen <= GameShimLen || src == m_vsrc) {
+                if (tlen <= GameShimLen || src == GetVirtualIp()) {
                     return 0;
                 }
                 src = (static_cast<u32>(tp[0]) << 24) | (tp[1] << 16) | (tp[2] << 8) | tp[3];
