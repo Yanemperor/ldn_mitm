@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 enum { RyuLinkLdnMitmRelayNameSize = 32 };
 
@@ -31,3 +32,6 @@ bool ryuLinkLdnMitmIpcGetRelayStatus(RyuLinkLdnMitmRelayStatus *out_status);
 
 /** Enables or disables Internet Relay without changing other ldn_mitm settings. */
 bool ryuLinkLdnMitmIpcSetInternetRelayEnabled(bool enabled);
+
+/** Writes the host-order virtual IPv4 lease returned by JoinRoom. */
+bool ryuLinkLdnMitmIpcSetVirtualIp(uint32_t ip);

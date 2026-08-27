@@ -3,6 +3,7 @@
 #include "localization.h"
 #include "qrcodegen.h"
 #include "room_selection_store.h"
+#include "virtual_ip.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -347,13 +348,28 @@ static void remember_room_selection(RyuLinkApp *app, const RyuLinkApiJoin *join)
     ryuLinkRoomSelectionSave(&stored);
 }
 
-static bool relay_is_ready(RyuLinkApp *app) {
-    RyuLinkLdnMitmRelayStatus relay_status;
+static bool apply_join_virtual_ip(RyuLinkApp *app, const RyuLinkApiJoin *join) {
+    uint32_t ip;
+    if (!ryuLinkParseVirtualIp(join->virtual_ip, &ip)) {
+        snprintf(app->join_message, sizeof(app->join_message), "%s",
+                 L("SERVER RETURNED INVALID VIRTUAL IP", "服务端返回的虚拟 IP 无效"));
+        return false;
+    }
+    if (!ryuLinkLdnMitmIpcSetVirtualIp(ip) || !ryuLinkLdnMitmIpcSetInternetRelayEnabled(true)) {
+        (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+        snprintf(app->join_message, sizeof(app->join_message), "%s",
+                 L("LDN_MITM RELAY SETUP FAILED", "LDN_MITM 中继设置失败"));
+        return false;
+    }
+    return true;
+}
 
-    if (ryuLinkLdnMitmIpcGetRelayStatus(&relay_status)) return true;
-    snprintf(app->join_message, sizeof(app->join_message), "%s",
-             L("LDN_MITM RELAY IS NOT READY", "LDN_MITM 中继未就绪"));
-    return false;
+static bool join_api(RyuLinkApp *app, uint64_t room_id, const char *password, RyuLinkApiJoin *join) {
+    char server_device_id[37];
+    if (!ryuLinkApiEnsureServerDevice(&app->auth, false, server_device_id)) return false;
+    if (ryuLinkApiJoinRoom(&app->auth, room_id, app->device_id, server_device_id, password, join)) return true;
+    if (!app->auth.device_not_registered || !ryuLinkApiEnsureServerDevice(&app->auth, true, server_device_id)) return false;
+    return ryuLinkApiJoinRoom(&app->auth, room_id, app->device_id, server_device_id, password, join);
 }
 
 static bool join_room(RyuLinkApp *app) {
@@ -363,13 +379,13 @@ static bool join_room(RyuLinkApp *app) {
     password[0] = '\0';
     app->vip_upsell_pending = false;
     app->auth.needs_vip = false;
+    (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
     if (app->room_detail.type[0] && !strcmp(app->room_detail.type, "VIP") && !app->auth.vip_active) {
         app->vip_upsell_pending = true;
         snprintf(app->join_message, sizeof(app->join_message), "%s",
                  L("VIP ZONE - MEMBERSHIP REQUIRED", "该房间为 VIP 专属区域，请开通会员后使用"));
         return false;
     }
-    if (!relay_is_ready(app)) return false;
     if (app->room_detail.password_required) {
         if (!prompt_password(password, sizeof(password))) {
             snprintf(app->join_message, sizeof(app->join_message), "%s", L("PASSWORD REQUIRED", "需要密码"));
@@ -377,7 +393,7 @@ static bool join_room(RyuLinkApp *app) {
         }
         password_arg = password;
     }
-    if (!ryuLinkApiJoinRoom(&app->auth, app->room_detail.id, app->device_id, password_arg, &join)) {
+    if (!join_api(app, app->room_detail.id, password_arg, &join)) {
         memset(password, 0, sizeof(password));
         if (app->auth.needs_vip) {
             app->vip_upsell_pending = true;
@@ -391,6 +407,8 @@ static bool join_room(RyuLinkApp *app) {
     }
     memset(password, 0, sizeof(password));
     app->vip_upsell_pending = false;
+
+    if (!apply_join_virtual_ip(app, &join)) return false;
 
     remember_room_selection(app, &join);
     app->last_heartbeat_ms = 0;
@@ -407,9 +425,8 @@ static bool join_room(RyuLinkApp *app) {
  */
 static void refresh_selection_from_control_plane(RyuLinkApp *app) {
     RyuLinkApiJoin join;
-    if (!relay_is_ready(app)) return;
-    if (!ryuLinkApiJoinRoom(&app->auth, app->room_selection.room_id,
-                            app->device_id, NULL, &join)) {
+    (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+    if (!join_api(app, app->room_selection.room_id, NULL, &join) || !apply_join_virtual_ip(app, &join)) {
         snprintf(app->join_message, sizeof(app->join_message), "%s",
                  L("UNABLE TO REFRESH SELECTED ROOM", "无法刷新已选房间，将使用默认服务器"));
         return;
@@ -445,12 +462,12 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
         case RyuLinkPending_LoginStart: ryuLinkAuthStart(&app->auth); break;
         case RyuLinkPending_AuthRestore:
             if (ryuLinkAuthRestore(&app->auth)) {
-                (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(true);
+                (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
                 enter_lobby(app);
             }
             break;
         case RyuLinkPending_EnterLobby:
-            (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(true);
+            (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
             enter_lobby(app);
             break;
         case RyuLinkPending_RefreshRooms: refresh_rooms(app); break;

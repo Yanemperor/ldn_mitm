@@ -19,6 +19,7 @@ enum {
     LdnMitmCmdGetRelayServerName = 65011,
     LdnMitmCmdGetSelectedRelayServer = 65012,
     LdnMitmCmdSetInternetRelayEnabled = 65014,
+    LdnMitmCmdSetVirtualIp = 65015,
 };
 
 static Service g_ldn_service;
@@ -102,4 +103,9 @@ bool ryuLinkLdnMitmIpcSetInternetRelayEnabled(bool enabled) {
     if (!ryuLinkLdnMitmIpcInitialize()) return false;
     return R_SUCCEEDED(serviceDispatchIn(&g_config_service,
                                          LdnMitmCmdSetInternetRelayEnabled, enabled));
+}
+
+bool ryuLinkLdnMitmIpcSetVirtualIp(uint32_t ip) {
+    if (!ryuLinkLdnMitmIpcInitialize()) return false;
+    return R_SUCCEEDED(serviceDispatchIn(&g_config_service, LdnMitmCmdSetVirtualIp, ip));
 }

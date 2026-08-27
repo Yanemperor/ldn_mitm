@@ -1,5 +1,7 @@
 #include "auth.h"
 #include "app_version.h"
+#include "device_identity_store.h"
+#include "ldn_mitm_ipc.h"
 #include "localization.h"
 #include "session_store.h"
 
@@ -42,7 +44,7 @@ static uint64_t now_ms(void) { return armTicksToNs(armGetSystemTick()) / 1000000
 static const char *next_object(const char *cursor, char *object, size_t object_size);
 
 static size_t receive(void *data, size_t size, size_t count, void *user) {
-    Response *response = user;
+    Response *response = (Response *)user;
     size_t bytes = size * count;
     if (bytes > MaxBody - response->length) { response->too_large = true; return 0; }
     memcpy(response->data + response->length, data, bytes);
@@ -210,6 +212,7 @@ static void fail(RyuLinkAuthSession *session, const char *message) {
     if (g_last_curl_result == CURLE_OPERATION_TIMEDOUT) message = L("Request timed out. Please try again.", "请求超时，请重试。");
     memset(g_device_code, 0, sizeof(g_device_code));
     memset(g_access_token, 0, sizeof(g_access_token));
+    (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
     session->state = RyuLinkAuth_Error;
     snprintf(session->message, sizeof(session->message), "%s", message);
 }
@@ -450,6 +453,55 @@ static bool api_ready(RyuLinkAuthSession *session) {
     return false;
 }
 
+static bool server_device_id_valid(const char *value) {
+    if (!value || !memchr(value, '\0', RyuLinkServerDeviceIdBytes) ||
+        strlen(value) != RyuLinkServerDeviceIdBytes - 1) return false;
+    for (size_t i = 0; i < RyuLinkServerDeviceIdBytes - 1; ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') return false;
+        } else if (!isxdigit((unsigned char)value[i])) return false;
+    }
+    return true;
+}
+
+static bool load_or_create_device_identity(RyuLinkAuthSession *session, RyuLinkDeviceIdentity *identity) {
+    static const char Hex[] = "0123456789abcdef";
+    u8 random[16];
+    if (ryuLinkDeviceIdentityLoad(identity)) return true;
+    memset(identity, 0, sizeof(*identity));
+    randomGet(random, sizeof(random));
+    for (size_t i = 0; i < sizeof(random); ++i) {
+        identity->device_bootstrap_id[i * 2] = Hex[random[i] >> 4];
+        identity->device_bootstrap_id[i * 2 + 1] = Hex[random[i] & 0x0f];
+    }
+    if (ryuLinkDeviceIdentitySave(identity)) return true;
+    return api_error(session, 0, L("Unable to save device identity.", "无法保存设备身份。"));
+}
+
+bool ryuLinkApiEnsureServerDevice(RyuLinkAuthSession *session, bool force_register,
+                                  char out_device_id[37]) {
+    RyuLinkDeviceIdentity identity;
+    Response response;
+    long status;
+    char body[128], object[256];
+    const char *data;
+    if (!api_ready(session) || !out_device_id || !load_or_create_device_identity(session, &identity)) return false;
+    if (!force_register && server_device_id_valid(identity.server_device_id)) {
+        snprintf(out_device_id, RyuLinkServerDeviceIdBytes, "%s", identity.server_device_id);
+        return true;
+    }
+    if (snprintf(body, sizeof(body), "{\"bootstrapId\":\"%s\"}", identity.device_bootstrap_id) >= (int)sizeof(body) ||
+        !request("https://api.ryulink.xyz/app-api/ryulink/devices/register", body, g_access_token, &status, &response) ||
+        !api_success(&response)) return api_error(session, status, L("Unable to register this device.", "无法注册此设备。"));
+    data = strstr(response.data, "\"data\"");
+    if (!data || !next_object(data, object, sizeof(object)) ||
+        !get_string(object, "deviceId", identity.server_device_id, sizeof(identity.server_device_id)) ||
+        !server_device_id_valid(identity.server_device_id) || !ryuLinkDeviceIdentitySave(&identity))
+        return api_error(session, status, L("Invalid device registration response.", "设备注册响应无效。"));
+    snprintf(out_device_id, RyuLinkServerDeviceIdBytes, "%s", identity.server_device_id);
+    return true;
+}
+
 static const char *next_object(const char *cursor, char *object, size_t object_size) {
     const char *start = strchr(cursor, '{'); size_t length = 0; int depth = 0; bool quoted = false;
     if (!start) return NULL;
@@ -547,22 +599,28 @@ bool ryuLinkApiSetPreferredNode(RyuLinkAuthSession *session, const char *node_id
 }
 
 bool ryuLinkApiJoinRoom(RyuLinkAuthSession *session, uint64_t room_id, const char *device_id,
-                        const char *password, RyuLinkApiJoin *join) {
-    char url[160], body[320], object[4096]; Response response; long status; const char *data;
+                        const char *server_device_id, const char *password, RyuLinkApiJoin *join) {
+    char url[160], body[384], object[4096]; Response response; long status; const char *data;
     int body_len;
     if (!api_ready(session) || !join || !device_id || !device_id[0] || strchr(device_id, '"') ||
+        !server_device_id_valid(server_device_id) ||
         (password && strchr(password, '"')) ||
         snprintf(url, sizeof(url), "https://api.ryulink.xyz/app-api/ryulink/rooms/%llu/join", (unsigned long long)room_id) >= (int)sizeof(url))
         return false;
     if (password && password[0]) {
-        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\",\"password\":\"%s\"}", device_id, password);
+        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\",\"serverDeviceId\":\"%s\",\"password\":\"%s\"}", device_id, server_device_id, password);
     } else {
-        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\"}", device_id);
+        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\",\"serverDeviceId\":\"%s\"}", device_id, server_device_id);
     }
     if (body_len < 0 || body_len >= (int)sizeof(body)) return false;
     memset(join, 0, sizeof(*join));
+    session->device_not_registered = false;
     if (!app_request(url, "POST", body, &status, &response) || !api_success(&response)) {
         uint32_t code = api_code(&response);
+        if (code == 42602) {
+            session->device_not_registered = true;
+            return api_error(session, status, L("DEVICE REGISTRATION EXPIRED", "设备注册已失效"));
+        }
         if (code == 40901) return api_error(session, status, L("ROOM IS FULL", "网络空间已满"));
         if (code == 40301) return api_error(session, status, L("NO TEST ACCESS", "无测试资格"));
         if (code == 40302) {
@@ -573,11 +631,13 @@ bool ryuLinkApiJoinRoom(RyuLinkAuthSession *session, uint64_t room_id, const cha
         if (code == 40303) return api_error(session, status, L("WRONG PASSWORD", "密码错误"));
         if (code == 40401) return api_error(session, status, L("ROOM NOT AVAILABLE", "网络空间不可用"));
         if (code == 50301) return api_error(session, status, L("ROOM CONNECTION UNAVAILABLE", "房间联机暂不可用"));
+        if (code == 50302) return api_error(session, status, L("VIRTUAL IP POOL EXHAUSTED", "虚拟 IP 地址池已耗尽"));
         if (code == 40902) return api_error(session, status, L("ROOM IS STARTING. TRY AGAIN SOON", "正在启动，请稍后重试"));
         return api_error(session, status, L("UNABLE TO JOIN ROOM", "无法加入网络空间"));
     }
     data = strstr(response.data, "\"data\"");
-    if (!data || !next_object(data, object, sizeof(object)) || !get_u64(object, "roomId", &join->room_id))
+    if (!data || !next_object(data, object, sizeof(object)) || !get_u64(object, "roomId", &join->room_id) ||
+        !get_string(object, "virtualIp", join->virtual_ip, sizeof(join->virtual_ip)))
         return api_error(session, status, "UNABLE TO JOIN ROOM");
     get_string(object, "roomName", join->room_name, sizeof(join->room_name));
     return true;
