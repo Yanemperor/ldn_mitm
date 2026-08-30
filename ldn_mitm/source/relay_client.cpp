@@ -757,6 +757,10 @@ namespace ams::mitm::ldn::relay {
         if (m_fd < 0 || m_rsrc == 0 || len == 0 || len > MaxWrapPayload) {
             return -1;
         }
+        const u32 virtual_src = GetVirtualIp();
+        if (virtual_src == 0) {
+            return -1;
+        }
         /* Address the frame by VIRTUAL addresses whenever we can. The server
            routes unicast by a last-writer-wins map of the outer source it
            learns from every frame; private LAN addresses collide across NATs
@@ -770,8 +774,8 @@ namespace ams::mitm::ldn::relay {
         const u32 vdst = bcast ? 0xFFFFFFFFu : this->LookupVsrc(dst_ip);
         if (vdst != 0) {
             u8 shimmed[GameShimLen + MaxWrapPayload];
-            shimmed[0] = (m_rsrc >> 24) & 0xff; shimmed[1] = (m_rsrc >> 16) & 0xff;
-            shimmed[2] = (m_rsrc >> 8) & 0xff;  shimmed[3] = m_rsrc & 0xff;
+            shimmed[0] = (virtual_src >> 24) & 0xff; shimmed[1] = (virtual_src >> 16) & 0xff;
+            shimmed[2] = (virtual_src >> 8) & 0xff;  shimmed[3] = virtual_src & 0xff;
             shimmed[4] = (dst_ip >> 24) & 0xff; shimmed[5] = (dst_ip >> 16) & 0xff;
             shimmed[6] = (dst_ip >> 8) & 0xff;  shimmed[7] = dst_ip & 0xff;
             std::memcpy(shimmed + GameShimLen, payload, len);
@@ -780,7 +784,7 @@ namespace ams::mitm::ldn::relay {
         /* Peer vsrc unknown (mapping not learned yet): legacy real-IP frame so
            nothing is worse than before. The mapping arrives with the peer's
            next control packet (<= one 5s beacon away). */
-        return this->SendWrapped(m_rsrc, dst_ip, dport, dport, IpIdGame, payload, len);
+        return this->SendWrapped(virtual_src, dst_ip, dport, dport, IpIdGame, payload, len);
     }
 
     void RelayTransport::LearnPeer(u32 real_ip, u32 vsrc) {
@@ -863,7 +867,7 @@ namespace ams::mitm::ldn::relay {
 
         /* Our own frame echoed back by the relay - never feed the game its own
            traffic. */
-        if (src == m_rsrc) {
+        if (src == GetVirtualIp()) {
             if (diag) { LogFormat("diag inject #%u DROP own-echo src %08x", in, src); }
             return;
         }
@@ -1030,7 +1034,7 @@ namespace ams::mitm::ldn::relay {
             /* Same gate as InjectGameFrame: tunnel streams only ever belong to
                consoles in our session; a shared relay delivers strangers'
                tunnel frames too, and stream ids are guessable. */
-            if (tlen > 0 && src != m_rsrc) {
+            if (tlen > 0 && src != GetVirtualIp()) {
                 SessionRegistry::Snapshot snap;
                 SessionRegistry::Get(&snap);
                 bool from_peer = false;

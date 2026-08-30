@@ -23,7 +23,7 @@ typedef struct {
     bool vip_active;
     /** Set by join when server returns 40302 VIP_REQUIRED. */
     bool needs_vip;
-    /** Set by join when the cached server device identity must be restored. */
+    /** Set by the virtual-IP endpoint when the cached server device must be restored. */
     bool device_not_registered;
     char private_room_name[101];
 } RyuLinkAuthSession;
@@ -60,7 +60,6 @@ typedef struct {
 typedef struct {
     uint64_t room_id;
     char room_name[101];
-    char virtual_ip[16];
 } RyuLinkApiJoin;
 
 typedef struct {
@@ -91,9 +90,12 @@ bool ryuLinkApiSetPreferredNode(RyuLinkAuthSession *session, const char *node_id
     identity when missing or when force_register is true. */
 bool ryuLinkApiEnsureServerDevice(RyuLinkAuthSession *session, bool force_register,
                                   char out_device_id[37]);
+/** Gets this device's permanent virtual IP. */
+bool ryuLinkApiGetVirtualIp(RyuLinkAuthSession *session, const char *server_device_id,
+                            char out_virtual_ip[16]);
 /** password may be NULL/empty for PUBLIC and VIP zones; required for PRIVATE (私服). */
 bool ryuLinkApiJoinRoom(RyuLinkAuthSession *session, uint64_t room_id, const char *device_id,
-                        const char *server_device_id, const char *password, RyuLinkApiJoin *join);
+                        const char *password, RyuLinkApiJoin *join);
 bool ryuLinkApiLeaveRoom(RyuLinkAuthSession *session, uint64_t room_id);
 /** Maintain ACTIVE membership; fails soft (returns false) if no seat — App keeps local selection. */
 bool ryuLinkApiHeartbeatRoom(RyuLinkAuthSession *session, uint64_t room_id);

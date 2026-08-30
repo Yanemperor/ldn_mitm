@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/** Parses the server's strict dotted-decimal 10.13.0.32–10.13.255.254 lease. */
+/** Parses the server's strict dotted-decimal lease, excluding reserved 10.13.37.1. */
 bool ryuLinkParseVirtualIp(const char *text, uint32_t *out_ip);
 
 #ifdef __cplusplus

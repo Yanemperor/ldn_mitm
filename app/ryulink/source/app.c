@@ -1,4 +1,5 @@
 #include "app.h"
+#include "device_identity_store.h"
 #include "ldn_mitm_ipc.h"
 #include "localization.h"
 #include "qrcodegen.h"
@@ -15,7 +16,7 @@ enum {
     ColorPanelMuted = RGBA8_MAXALPHA(35, 40, 54), ColorPrimary = RGBA8_MAXALPHA(0, 200, 255),
     ColorAccent = RGBA8_MAXALPHA(123, 97, 255), ColorText = RGBA8_MAXALPHA(242, 246, 252),
     ColorMuted = RGBA8_MAXALPHA(151, 165, 184), ColorGood = RGBA8_MAXALPHA(66, 218, 151),
-    ColorBusy = RGBA8_MAXALPHA(255, 195, 70), RoomsPerPage = 5,
+    ColorBusy = RGBA8_MAXALPHA(255, 195, 70),
 };
 
 static uint8_t g_qr_temp[qrcodegen_BUFFER_LEN_FOR_VERSION(20)];
@@ -90,18 +91,6 @@ static const char *space_type_api(RyuLinkSpaceKind kind) {
     return "PUBLIC";
 }
 
-static const char *space_title(RyuLinkSpaceKind kind) {
-    if (kind == RyuLinkSpace_Vip) return L("VIP ZONE", "VIP区");
-    if (kind == RyuLinkSpace_Private) return L("PRIVATE SERVER", "私服");
-    return L("PUBLIC ZONE", "公共区");
-}
-
-static const char *space_subtitle(RyuLinkSpaceKind kind) {
-    if (kind == RyuLinkSpace_Vip) return L("MEMBERS ONLY NETWORK SPACES", "会员专属网络空间");
-    if (kind == RyuLinkSpace_Private) return L("PASSWORD PRIVATE SERVERS", "需要密码的私服");
-    return L("OPEN PUBLIC NETWORK SPACES", "开放的公共网络空间");
-}
-
 static const char *room_type_label(const char *room_type) {
     if (room_type && !strcmp(room_type, "VIP")) return L("VIP ZONE", "VIP区");
     if (room_type && !strcmp(room_type, "PRIVATE")) return L("PRIVATE SERVER", "私服");
@@ -161,48 +150,31 @@ static const char *room_status(const char *status) {
 }
 
 static void draw_home(const RyuLinkApp *app) {
-    const RyuLinkApiRoomPage *page = &app->room_page;
-    int first = app->selected_room / RoomsPerPage * RoomsPerPage;
-    const RyuLinkSpaceKind kinds[RyuLinkRoomTypeCount] = {
-        RyuLinkSpace_Public
-    };
-    draw_header(L("LOBBY", "大厅"), space_subtitle(app->space_kind));
+    bool no_computer = app->relay_mode == RyuLinkRelayMode_NoComputerBeta;
+
+    draw_header(L("LOBBY", "大厅"), L("CHOOSE A RELAY MODE", "选择中继方式"));
     ryuLinkUiRoundedPanel(64, 178, 245, 430, 16, ColorPanel);
-    ryuLinkUiText(92, 204, 2, app->type_list_focused ? ColorPrimary : ColorMuted, L("ROOM TYPE", "房间类型"));
-    for (int i = 0; i < RyuLinkRoomTypeCount; ++i) {
-        int y = 260 + i * 80;
-        bool selected = kinds[i] == app->space_kind;
-        if (selected) {
-            ryuLinkUiRoundedPanel(80, y - 12, 213, 58, 9,
-                                  app->type_list_focused ? ColorAccent : ColorPanelMuted);
-        }
-        ryuLinkUiText(96, y + 6, 2, selected ? ColorText : ColorMuted, space_title(kinds[i]));
-    }
+    ryuLinkUiText(92, 204, 2, ColorPrimary, L("RELAY MODE", "中继方式"));
+    if (no_computer) ryuLinkUiRoundedPanel(80, 248, 213, 58, 9, ColorAccent);
+    ryuLinkUiText(96, 266, 2, no_computer ? ColorText : ColorMuted, L("1 NO-PC BETA", "1 免电脑 beta"));
+    if (!no_computer) ryuLinkUiRoundedPanel(80, 328, 213, 58, 9, ColorAccent);
+    ryuLinkUiText(96, 346, 2, no_computer ? ColorMuted : ColorText, L("2 COMPUTER RELAY", "2 电脑中继"));
+
     ryuLinkUiRoundedPanel(335, 178, 881, 430, 16, ColorPanel);
-    ryuLinkUiText(370, 204, 2, app->type_list_focused ? ColorMuted : ColorPrimary, space_title(app->space_kind));
-    for (int row = 0; row < RoomsPerPage; ++row) {
-        int index = first + row, y = 248 + row * 66; char players[32];
-        if (index >= page->count) break;
-        const RyuLinkApiRoom *room = &page->rooms[index]; bool selected = index == app->selected_room;
-        snprintf(players, sizeof(players), L("%u / %u IN SPACE", "%u / %u 人在网"), room->online_player_count, room->capacity);
-        if (selected) ryuLinkUiRoundedPanel(365, y - 8, 820, 51, 9, app->type_list_focused ? ColorPanelMuted : ColorAccent);
-        ryuLinkUiText(390, y + 4, 2, selected ? ColorText : ColorMuted, room->name);
-        if (room->type[0] && !strcmp(room->type, "VIP")) {
-            ryuLinkUiText(640, y + 4, 2, ColorBusy, L("VIP", "VIP"));
-        }
-        ryuLinkUiText(720, y + 4, 2, room_color(room), room_status(room->runtime_status));
-        ryuLinkUiText(960, y + 4, 2, ColorMuted, players);
+    if (no_computer) {
+        ryuLinkUiText(390, 225, 3, ColorPrimary, L("NO-PC BETA", "免电脑 beta"));
+        ryuLinkUiText(390, 300, 2, ColorText, L("START RELAY WITH YOUR VIRTUAL IP", "使用虚拟 IP 开启中继"));
+        ryuLinkUiText(390, 345, 2, ColorMuted,
+                      L("NO COMPUTER RELAY IS REQUIRED", "无需使用电脑中继"));
+        ryuLinkUiRoundedPanel(590, 438, 340, 72, 12, ColorAccent);
+        ryuLinkUiText(670, 463, 3, ColorText, L("A START RELAY", "A 开启中继"));
+        if (app->join_message[0])
+            ryuLinkUiText(390, 540, 2, ColorGood, app->join_message);
+    } else {
+        ryuLinkUiText(390, 225, 3, ColorPrimary, L("COMPUTER RELAY", "电脑中继"));
+        ryuLinkUiCenteredText(350, 3, ColorMuted, L("NOT PLANNED", "暂不开发"));
     }
-    if (!page->count) {
-        ryuLinkUiText(430, 330, 2, ColorMuted,
-                      app->auth.message[0] ? app->auth.message : L("NO NETWORK SPACES", "没有可用网络空间"));
-    }
-    if (app->room_selection.active && app->room_selection.room_name[0]) {
-        char selected[140];
-        snprintf(selected, sizeof(selected), L("SELECTED: %s", "已选择：%s"), app->room_selection.room_name);
-        ryuLinkUiText(365, 540, 2, ColorGood, selected);
-    }
-    ryuLinkUiText(365, 568, 2, ColorMuted, L("A SELECT  B TYPE LIST  DPAD MOVE", "A 选择  B 类型列表  十字键移动"));
+    ryuLinkUiText(390, 568, 2, ColorMuted, L("DPAD MOVE", "十字键切换"));
     draw_navigation(RyuLinkPage_Home);
 }
 
@@ -290,7 +262,6 @@ static bool refresh_rooms(RyuLinkApp *app) {
 }
 
 static void enter_lobby(RyuLinkApp *app) {
-    if (!refresh_rooms(app)) return;
     ryuLinkApiListNodes(&app->auth, app->nodes, &app->node_count);
     for (uint8_t i = 0; i < app->node_count; ++i) if (app->nodes[i].preferred) { app->selected_node = i; break; }
     app->page = RyuLinkPage_Home;
@@ -300,7 +271,7 @@ void ryuLinkAppInitialize(RyuLinkApp *app) {
     static const char Hex[] = "0123456789abcdef";
     u8 random[16];
     RyuLinkStoredRoomSelection stored;
-    memset(app, 0, sizeof(*app)); app->page = RyuLinkPage_Splash; app->type_list_focused = true; app->splash_started_ms = current_ms();
+    memset(app, 0, sizeof(*app)); app->page = RyuLinkPage_Splash; app->type_list_focused = true; app->relay_mode = RyuLinkRelayMode_NoComputerBeta; app->splash_started_ms = current_ms();
     app->pending = RyuLinkPending_None; app->pending_target = RyuLinkPage_Login;
     randomGet(random, sizeof(random));
     for (size_t i = 0; i < sizeof(random); ++i) { app->device_id[i * 2] = Hex[random[i] >> 4]; app->device_id[i * 2 + 1] = Hex[random[i] & 0x0f]; }
@@ -348,14 +319,23 @@ static void remember_room_selection(RyuLinkApp *app, const RyuLinkApiJoin *join)
     ryuLinkRoomSelectionSave(&stored);
 }
 
-static bool apply_join_virtual_ip(RyuLinkApp *app, const RyuLinkApiJoin *join) {
+static bool configure_virtual_ip(RyuLinkApp *app) {
+    char server_device_id[RyuLinkServerDeviceIdBytes];
+    char virtual_ip[16];
     uint32_t ip;
-    if (!ryuLinkParseVirtualIp(join->virtual_ip, &ip)) {
+
+    if (!ryuLinkApiEnsureServerDevice(&app->auth, false, server_device_id)) return false;
+    if (!ryuLinkApiGetVirtualIp(&app->auth, server_device_id, virtual_ip)) {
+        if (!app->auth.device_not_registered ||
+            !ryuLinkApiEnsureServerDevice(&app->auth, true, server_device_id) ||
+            !ryuLinkApiGetVirtualIp(&app->auth, server_device_id, virtual_ip)) return false;
+    }
+    if (!ryuLinkParseVirtualIp(virtual_ip, &ip)) {
         snprintf(app->join_message, sizeof(app->join_message), "%s",
                  L("SERVER RETURNED INVALID VIRTUAL IP", "服务端返回的虚拟 IP 无效"));
         return false;
     }
-    if (!ryuLinkLdnMitmIpcSetVirtualIp(ip) || !ryuLinkLdnMitmIpcSetInternetRelayEnabled(true)) {
+    if (!ryuLinkLdnMitmIpcSetVirtualIp(ip)) {
         (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
         snprintf(app->join_message, sizeof(app->join_message), "%s",
                  L("LDN_MITM RELAY SETUP FAILED", "LDN_MITM 中继设置失败"));
@@ -364,12 +344,32 @@ static bool apply_join_virtual_ip(RyuLinkApp *app, const RyuLinkApiJoin *join) {
     return true;
 }
 
+static bool enable_relay(RyuLinkApp *app) {
+    if (ryuLinkLdnMitmIpcSetInternetRelayEnabled(true)) return true;
+    (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+    snprintf(app->join_message, sizeof(app->join_message), "%s",
+             L("LDN_MITM RELAY SETUP FAILED", "LDN_MITM 中继设置失败"));
+    return false;
+}
+
+static bool start_no_computer_relay(RyuLinkApp *app) {
+    app->join_message[0] = '\0';
+    (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+    if (!configure_virtual_ip(app)) {
+        if (!app->join_message[0]) {
+            snprintf(app->join_message, sizeof(app->join_message), "%s",
+                     app->auth.message[0] ? app->auth.message : L("UNABLE TO GET VIRTUAL IP", "无法获取虚拟 IP"));
+        }
+        return false;
+    }
+    if (!enable_relay(app)) return false;
+    snprintf(app->join_message, sizeof(app->join_message), "%s",
+             L("RELAY READY - START YOUR GAME", "中继已就绪，启动游戏即可联机"));
+    return true;
+}
+
 static bool join_api(RyuLinkApp *app, uint64_t room_id, const char *password, RyuLinkApiJoin *join) {
-    char server_device_id[37];
-    if (!ryuLinkApiEnsureServerDevice(&app->auth, false, server_device_id)) return false;
-    if (ryuLinkApiJoinRoom(&app->auth, room_id, app->device_id, server_device_id, password, join)) return true;
-    if (!app->auth.device_not_registered || !ryuLinkApiEnsureServerDevice(&app->auth, true, server_device_id)) return false;
-    return ryuLinkApiJoinRoom(&app->auth, room_id, app->device_id, server_device_id, password, join);
+    return ryuLinkApiJoinRoom(&app->auth, room_id, app->device_id, password, join);
 }
 
 static bool join_room(RyuLinkApp *app) {
@@ -379,6 +379,7 @@ static bool join_room(RyuLinkApp *app) {
     password[0] = '\0';
     app->vip_upsell_pending = false;
     app->auth.needs_vip = false;
+    app->join_message[0] = '\0';
     (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
     if (app->room_detail.type[0] && !strcmp(app->room_detail.type, "VIP") && !app->auth.vip_active) {
         app->vip_upsell_pending = true;
@@ -392,6 +393,14 @@ static bool join_room(RyuLinkApp *app) {
             return false;
         }
         password_arg = password;
+    }
+    if (!configure_virtual_ip(app)) {
+        memset(password, 0, sizeof(password));
+        if (!app->join_message[0]) {
+            snprintf(app->join_message, sizeof(app->join_message), "%s",
+                     app->auth.message[0] ? app->auth.message : L("UNABLE TO GET VIRTUAL IP", "无法获取虚拟 IP"));
+        }
+        return false;
     }
     if (!join_api(app, app->room_detail.id, password_arg, &join)) {
         memset(password, 0, sizeof(password));
@@ -408,7 +417,7 @@ static bool join_room(RyuLinkApp *app) {
     memset(password, 0, sizeof(password));
     app->vip_upsell_pending = false;
 
-    if (!apply_join_virtual_ip(app, &join)) return false;
+    if (!enable_relay(app)) return false;
 
     remember_room_selection(app, &join);
     app->last_heartbeat_ms = 0;
@@ -426,12 +435,20 @@ static bool join_room(RyuLinkApp *app) {
 static void refresh_selection_from_control_plane(RyuLinkApp *app) {
     RyuLinkApiJoin join;
     (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
-    if (!join_api(app, app->room_selection.room_id, NULL, &join) || !apply_join_virtual_ip(app, &join)) {
+    if (!configure_virtual_ip(app) || !join_api(app, app->room_selection.room_id, NULL, &join) ||
+        !enable_relay(app)) {
+        (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
         snprintf(app->join_message, sizeof(app->join_message), "%s",
                  L("UNABLE TO REFRESH SELECTED ROOM", "无法刷新已选房间，将使用默认服务器"));
         return;
     }
     remember_room_selection(app, &join);
+    app->last_heartbeat_ms = 0;
+}
+
+static void clear_room_selection(RyuLinkApp *app) {
+    ryuLinkRoomSelectionClear();
+    memset(&app->room_selection, 0, sizeof(app->room_selection));
     app->last_heartbeat_ms = 0;
 }
 
@@ -442,9 +459,7 @@ static void leave_room(RyuLinkApp *app) {
                  app->auth.message[0] ? app->auth.message : L("UNABLE TO LEAVE SPACE", "无法离开网络空间"));
         return;
     }
-    ryuLinkRoomSelectionClear();
-    memset(&app->room_selection, 0, sizeof(app->room_selection));
-    app->last_heartbeat_ms = 0;
+    clear_room_selection(app);
     snprintf(app->join_message, sizeof(app->join_message), "%s", L("SPACE SELECTION CLEARED", "已清除网络空间选择"));
 }
 
@@ -479,6 +494,7 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
                 app->page = RyuLinkPage_RoomDetail;
             }
             break;
+        case RyuLinkPending_EnableNoComputerRelay: start_no_computer_relay(app); break;
         case RyuLinkPending_JoinRoom: join_room(app); break;
         case RyuLinkPending_LeaveRoom: leave_room(app); break;
         case RyuLinkPending_SetPreferredNode:
@@ -486,6 +502,9 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
             break;
         case RyuLinkPending_Logout:
             (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+            if (app->room_selection.active)
+                (void)ryuLinkApiLeaveRoom(&app->auth, app->room_selection.room_id);
+            clear_room_selection(app);
             ryuLinkAuthCancel(&app->auth);
             app->page = app->pending_target;
             break;
@@ -547,35 +566,13 @@ void ryuLinkAppHandleInput(RyuLinkApp *app, u64 buttons) {
         return;
     }
     if (app->page != RyuLinkPage_Home) return;
-    if (buttons & HidNpadButton_B) {
-        if (!app->type_list_focused) app->type_list_focused = true;
+    if ((buttons & HidNpadButton_A) && app->relay_mode == RyuLinkRelayMode_NoComputerBeta) {
+        begin_pending(app, RyuLinkPending_EnableNoComputerRelay);
         return;
     }
-    if (buttons & HidNpadButton_A) {
-        if (app->type_list_focused) {
-            app->type_list_focused = false;
-            app->selected_room = 0;
-        } else if (app->room_page.count) {
-            begin_pending(app, RyuLinkPending_GetRoom);
-        }
-        return;
-    }
-    if (buttons & HidNpadButton_Up) {
-        if (app->type_list_focused) {
-            app->space_kind = (RyuLinkSpaceKind)((app->space_kind + RyuLinkRoomTypeCount - 1) % RyuLinkRoomTypeCount);
-            begin_pending(app, RyuLinkPending_RefreshRooms);
-        } else if (app->room_page.count) {
-            app->selected_room = (app->selected_room + app->room_page.count - 1) % app->room_page.count;
-        }
-    }
-    if (buttons & HidNpadButton_Down) {
-        if (app->type_list_focused) {
-            app->space_kind = (RyuLinkSpaceKind)((app->space_kind + 1) % RyuLinkRoomTypeCount);
-            begin_pending(app, RyuLinkPending_RefreshRooms);
-        } else if (app->room_page.count) {
-            app->selected_room = (app->selected_room + 1) % app->room_page.count;
-        }
-    }
+    if (buttons & (HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Left | HidNpadButton_Right))
+        app->relay_mode = app->relay_mode == RyuLinkRelayMode_NoComputerBeta
+                              ? RyuLinkRelayMode_Computer : RyuLinkRelayMode_NoComputerBeta;
 }
 
 void ryuLinkAppHandleTouch(RyuLinkApp *app, uint32_t x, uint32_t y) {
@@ -628,23 +625,11 @@ void ryuLinkAppHandleTouch(RyuLinkApp *app, uint32_t x, uint32_t y) {
         return;
     }
     if (app->page != RyuLinkPage_Home) return;
-    if (x >= 80 && x < 300 && y >= 240 && y < 520) {
-        int type = (int)((y - 240) / 80);
-        if (type >= 0 && type < RyuLinkRoomTypeCount) {
-            app->space_kind = (RyuLinkSpaceKind)type;
-            app->type_list_focused = true;
-            begin_pending(app, RyuLinkPending_RefreshRooms);
-        }
-        return;
-    }
-    if (x >= 365 && x < 1190 && y >= 230 && y < 580) {
-        int room = (int)((y - 230) / 66) + (app->selected_room / RoomsPerPage * RoomsPerPage);
-        if (room < app->room_page.count) {
-            app->selected_room = room;
-            app->type_list_focused = false;
-            begin_pending(app, RyuLinkPending_GetRoom);
-        }
-        return;
+    if (x >= 80 && x < 300 && y >= 240 && y < 400)
+        app->relay_mode = y < 320 ? RyuLinkRelayMode_NoComputerBeta : RyuLinkRelayMode_Computer;
+    else if (app->relay_mode == RyuLinkRelayMode_NoComputerBeta &&
+             x >= 590 && x < 930 && y >= 438 && y < 510) {
+        begin_pending(app, RyuLinkPending_EnableNoComputerRelay);
     }
 }
 

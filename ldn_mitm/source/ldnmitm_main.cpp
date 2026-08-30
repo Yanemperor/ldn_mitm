@@ -145,14 +145,14 @@ namespace ams {
                 static constexpr bool   CanManageMitmServers  = true;
             };
 
-            /* Two mitm ports: ldn:u and the busy bsd:u (every game's sockets).
-               bsd:u needs many more concurrent sessions or we would refuse
-               them and break networking. */
+            /* ldn:u plus both BSD services used by games. */
             enum PortIndex {
-                PortIndex_Ldn = 0,
-                PortIndex_Bsd = 1,
+                PortIndex_Ldn,
+                PortIndex_BsdUser,
+                PortIndex_BsdSystem,
                 PortIndex_Count,
             };
+            static_assert(PortIndex_Count == 3);
             constexpr size_t MaxSessions = 0x20;
 
             class ServerManager final : public sf::hipc::ServerManager<PortIndex_Count, LdnMitmManagerOptions, MaxSessions> {
@@ -171,7 +171,8 @@ namespace ams {
                 switch (port_index) {
                     case PortIndex_Ldn:
                         return this->AcceptMitmImpl(server, sf::CreateSharedObjectEmplaced<mitm::ldn::ILdnMitMService, mitm::ldn::LdnMitMService>(decltype(fsrv)(fsrv), client_info), fsrv);
-                    case PortIndex_Bsd:
+                    case PortIndex_BsdUser:
+                    case PortIndex_BsdSystem:
                         return this->AcceptMitmImpl(server, sf::CreateSharedObjectEmplaced<mitm::ldn::IBsdMitmInterface, mitm::ldn::BsdMitmService>(decltype(fsrv)(fsrv), client_info), fsrv);
                     AMS_UNREACHABLE_DEFAULT_CASE();
                 }
@@ -267,8 +268,10 @@ namespace ams {
         constexpr sm::ServiceName LdnMitmServiceName = sm::ServiceName::Encode("ldn:u");
         R_ABORT_UNLESS((mitm::g_server_manager.RegisterMitmServer<mitm::ldn::LdnMitMService>(mitm::PortIndex_Ldn, LdnMitmServiceName)));
 
-        constexpr sm::ServiceName BsdMitmServiceName = sm::ServiceName::Encode("bsd:u");
-        R_ABORT_UNLESS((mitm::g_server_manager.RegisterMitmServer<mitm::ldn::BsdMitmService>(mitm::PortIndex_Bsd, BsdMitmServiceName)));
+        constexpr sm::ServiceName BsdUserMitmServiceName = sm::ServiceName::Encode("bsd:u");
+        R_ABORT_UNLESS((mitm::g_server_manager.RegisterMitmServer<mitm::ldn::BsdMitmService>(mitm::PortIndex_BsdUser, BsdUserMitmServiceName)));
+        constexpr sm::ServiceName BsdSystemMitmServiceName = sm::ServiceName::Encode("bsd:s");
+        R_ABORT_UNLESS((mitm::g_server_manager.RegisterMitmServer<mitm::ldn::BsdMitmService>(mitm::PortIndex_BsdSystem, BsdSystemMitmServiceName)));
         LogFormat("registered");
 
         /* Load the internet-relay config (docs/internet-relay-plan.md). Relay

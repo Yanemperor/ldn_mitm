@@ -20,6 +20,7 @@ docker compose run --rm devkit
 ```text
 switch/RyuLink/RyuLink.nro
 atmosphere/contents/4200000000000010/exefs.nsp
+atmosphere/contents/4200000000000010/flags/boot2.flag
 config/ldn_mitm/relay.cfg
 ```
 
@@ -40,4 +41,4 @@ config/ldn_mitm/relay.cfg
 out/sd/switch/RyuLink/RyuLink.nro
 ```
 
-同时必须复制同一 `out/sd/` 构建中的 sysmodule 和 `config/ldn_mitm/relay.cfg`；单独更新 NRO 不足以完成该 MVP 的安装。
+同时必须复制同一 `out/sd/` 构建中的 sysmodule、零字节 `flags/boot2.flag` 启动标记和 `config/ldn_mitm/relay.cfg`；单独更新 NRO 不足以完成该 MVP 的安装。

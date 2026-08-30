@@ -19,5 +19,5 @@ bool ryuLinkParseVirtualIp(const char *text, uint32_t *out_ip) {
         octets[index] = value;
     }
     *out_ip = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
-    return *out_ip >= 0x0A0D0020u && *out_ip <= 0x0A0DFFFEu;
+    return *out_ip >= 0x0A0D0020u && *out_ip <= 0x0A0DFFFEu && *out_ip != 0x0A0D2501u;
 }

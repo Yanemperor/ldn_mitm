@@ -1,5 +1,7 @@
 #include "ldn_icommunication.hpp"
 #include "nifm_manager.hpp"
+#include "relay_client.hpp"
+#include "virtual_ip.hpp"
 #include <arpa/inet.h>
 
 namespace ams::mitm::ldn {
@@ -89,6 +91,13 @@ namespace ams::mitm::ldn {
     }
 
     Result ICommunicationService::GetIpv4Address(sf::Out<u32> address, sf::Out<u32> netmask) {
+        if (relay::IsEnabled()) {
+            R_TRY(relay::RequireVirtualIp(address.GetPointer()));
+            netmask.SetValue(relay::VirtualIpNetmask);
+            LogFormat("get_ipv4_address %x %x", address.GetValue(), netmask.GetValue());
+            return ResultSuccess();
+        }
+
         /* Callable before Initialize/after Finalize, when no nifm session is
            held; acquire one for the duration of this call. */
         ScopedNifmSession session;

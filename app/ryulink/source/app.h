@@ -29,6 +29,7 @@ typedef enum {
     RyuLinkPending_EnterLobby,
     RyuLinkPending_RefreshRooms,
     RyuLinkPending_GetRoom,
+    RyuLinkPending_EnableNoComputerRelay,
     RyuLinkPending_JoinRoom,
     RyuLinkPending_LeaveRoom,
     RyuLinkPending_SetPreferredNode,
@@ -40,6 +41,11 @@ typedef enum {
     RyuLinkSpace_Vip = 1,
     RyuLinkSpace_Private = 2,
 } RyuLinkSpaceKind;
+
+typedef enum {
+    RyuLinkRelayMode_NoComputerBeta,
+    RyuLinkRelayMode_Computer,
+} RyuLinkRelayMode;
 
 typedef struct {
     bool active;
@@ -55,6 +61,7 @@ typedef struct {
     /** True when focus is on the left roomType list; false when on the room list. */
     bool type_list_focused;
     RyuLinkSpaceKind space_kind;
+    RyuLinkRelayMode relay_mode;
     u8 profile_action;
     u8 selected_node;
     u8 node_count;

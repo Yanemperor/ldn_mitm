@@ -17,7 +17,7 @@ static void reject(const char *text) {
 
 int main() {
     accept("10.13.0.32", 0x0A0D0020u);
-    accept("10.13.37.1", 0x0A0D2501u);
+    reject("10.13.37.1");
     accept("10.13.37.255", 0x0A0D25FFu);
     accept("10.13.255.254", 0x0A0DFFFEu);
     reject("10.13.0.0"); reject("10.13.0.1"); reject("10.13.0.31"); reject("10.13.255.255");

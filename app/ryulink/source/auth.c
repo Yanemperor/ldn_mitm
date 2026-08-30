@@ -502,6 +502,34 @@ bool ryuLinkApiEnsureServerDevice(RyuLinkAuthSession *session, bool force_regist
     return true;
 }
 
+bool ryuLinkApiGetVirtualIp(RyuLinkAuthSession *session, const char *server_device_id,
+                            char out_virtual_ip[16]) {
+    char url[160], object[256];
+    Response response;
+    long status;
+    const char *data;
+
+    if (!api_ready(session) || !server_device_id_valid(server_device_id) || !out_virtual_ip ||
+        snprintf(url, sizeof(url), "https://api.ryulink.xyz/app-api/ryulink/devices/%s/virtual-ip",
+                 server_device_id) >= (int)sizeof(url)) return false;
+    session->device_not_registered = false;
+    if (!app_request(url, "GET", NULL, &status, &response) || !api_success(&response)) {
+        uint32_t code = api_code(&response);
+        if (code == 42602) {
+            session->device_not_registered = true;
+            return api_error(session, status, L("DEVICE REGISTRATION EXPIRED", "设备注册已失效"));
+        }
+        if (code == 50302) return api_error(session, status, L("VIRTUAL IP POOL EXHAUSTED", "虚拟 IP 地址池已耗尽"));
+        if (code == 40903) return api_error(session, status, L("VIRTUAL IP LEASE RESERVED", "虚拟 IP 租约为保留地址"));
+        return api_error(session, status, L("UNABLE TO GET VIRTUAL IP", "无法获取虚拟 IP"));
+    }
+    data = strstr(response.data, "\"data\"");
+    if (!data || !next_object(data, object, sizeof(object)) ||
+        !get_string(object, "virtualIp", out_virtual_ip, 16))
+        return api_error(session, status, L("INVALID VIRTUAL IP RESPONSE", "虚拟 IP 响应无效"));
+    return true;
+}
+
 static const char *next_object(const char *cursor, char *object, size_t object_size) {
     const char *start = strchr(cursor, '{'); size_t length = 0; int depth = 0; bool quoted = false;
     if (!start) return NULL;
@@ -599,28 +627,22 @@ bool ryuLinkApiSetPreferredNode(RyuLinkAuthSession *session, const char *node_id
 }
 
 bool ryuLinkApiJoinRoom(RyuLinkAuthSession *session, uint64_t room_id, const char *device_id,
-                        const char *server_device_id, const char *password, RyuLinkApiJoin *join) {
+                        const char *password, RyuLinkApiJoin *join) {
     char url[160], body[384], object[4096]; Response response; long status; const char *data;
     int body_len;
     if (!api_ready(session) || !join || !device_id || !device_id[0] || strchr(device_id, '"') ||
-        !server_device_id_valid(server_device_id) ||
         (password && strchr(password, '"')) ||
         snprintf(url, sizeof(url), "https://api.ryulink.xyz/app-api/ryulink/rooms/%llu/join", (unsigned long long)room_id) >= (int)sizeof(url))
         return false;
     if (password && password[0]) {
-        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\",\"serverDeviceId\":\"%s\",\"password\":\"%s\"}", device_id, server_device_id, password);
+        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\",\"password\":\"%s\"}", device_id, password);
     } else {
-        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\",\"serverDeviceId\":\"%s\"}", device_id, server_device_id);
+        body_len = snprintf(body, sizeof(body), "{\"deviceId\":\"%s\"}", device_id);
     }
     if (body_len < 0 || body_len >= (int)sizeof(body)) return false;
     memset(join, 0, sizeof(*join));
-    session->device_not_registered = false;
     if (!app_request(url, "POST", body, &status, &response) || !api_success(&response)) {
         uint32_t code = api_code(&response);
-        if (code == 42602) {
-            session->device_not_registered = true;
-            return api_error(session, status, L("DEVICE REGISTRATION EXPIRED", "设备注册已失效"));
-        }
         if (code == 40901) return api_error(session, status, L("ROOM IS FULL", "网络空间已满"));
         if (code == 40301) return api_error(session, status, L("NO TEST ACCESS", "无测试资格"));
         if (code == 40302) {
@@ -631,13 +653,11 @@ bool ryuLinkApiJoinRoom(RyuLinkAuthSession *session, uint64_t room_id, const cha
         if (code == 40303) return api_error(session, status, L("WRONG PASSWORD", "密码错误"));
         if (code == 40401) return api_error(session, status, L("ROOM NOT AVAILABLE", "网络空间不可用"));
         if (code == 50301) return api_error(session, status, L("ROOM CONNECTION UNAVAILABLE", "房间联机暂不可用"));
-        if (code == 50302) return api_error(session, status, L("VIRTUAL IP POOL EXHAUSTED", "虚拟 IP 地址池已耗尽"));
         if (code == 40902) return api_error(session, status, L("ROOM IS STARTING. TRY AGAIN SOON", "正在启动，请稍后重试"));
         return api_error(session, status, L("UNABLE TO JOIN ROOM", "无法加入网络空间"));
     }
     data = strstr(response.data, "\"data\"");
-    if (!data || !next_object(data, object, sizeof(object)) || !get_u64(object, "roomId", &join->room_id) ||
-        !get_string(object, "virtualIp", join->virtual_ip, sizeof(join->virtual_ip)))
+    if (!data || !next_object(data, object, sizeof(object)) || !get_u64(object, "roomId", &join->room_id))
         return api_error(session, status, "UNABLE TO JOIN ROOM");
     get_string(object, "roomName", join->room_name, sizeof(join->room_name));
     return true;
@@ -648,7 +668,6 @@ bool ryuLinkApiLeaveRoom(RyuLinkAuthSession *session, uint64_t room_id) {
     if (!api_ready(session) ||
         snprintf(url, sizeof(url), "https://api.ryulink.xyz/app-api/ryulink/rooms/%llu/leave", (unsigned long long)room_id) >= (int)sizeof(url)) return false;
     if (!app_request(url, "POST", "{}", &status, &response) || !api_success(&response)) {
-        uint32_t code = api_code(&response);
         return api_error(session, status, "UNABLE TO LEAVE ROOM");
     }
     return true;

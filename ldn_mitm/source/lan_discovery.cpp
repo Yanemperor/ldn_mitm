@@ -10,6 +10,7 @@
 #include "ipinfo.hpp"
 #include "nifm_manager.hpp"
 #include "session_registry.hpp"
+#include "virtual_ip.hpp"
 
 namespace ams::mitm::ldn {
 
@@ -929,12 +930,21 @@ namespace ams::mitm::ldn {
         /* Called with dataMutex held (updateNodes / onSyncNetwork). Hand the
            current peer IPs to the bsd:u mitm so it can turn the game's LDN
            broadcasts into per-peer unicast. */
-        u32 address = 0, netmask = 0, gateway, primary_dns, secondary_dns;
-        if (R_FAILED(nifmGetCurrentIpConfigInfo(&address, &netmask, &gateway, &primary_dns, &secondary_dns))) {
-            return;
+        u32 self_ip = 0;
+        u32 bcast_ip = 0;
+        if (relay::IsEnabled()) {
+            if (R_FAILED(relay::RequireVirtualIp(&self_ip))) {
+                return;
+            }
+            bcast_ip = relay::VirtualIpBroadcast(self_ip);
+        } else {
+            u32 address = 0, netmask = 0, gateway, primary_dns, secondary_dns;
+            if (R_FAILED(nifmGetCurrentIpConfigInfo(&address, &netmask, &gateway, &primary_dns, &secondary_dns))) {
+                return;
+            }
+            self_ip = ntohl(address);
+            bcast_ip = self_ip | ~ntohl(netmask);
         }
-        const u32 self_ip = ntohl(address);
-        const u32 bcast_ip = self_ip | ~ntohl(netmask);
 
         u32 peers[SessionRegistry::MaxPeers];
         int count = 0;
