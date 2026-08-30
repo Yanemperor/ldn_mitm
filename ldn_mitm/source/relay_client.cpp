@@ -47,6 +47,10 @@ namespace ams::mitm::ldn::relay {
            away from us. Far from lan-play's 0x00-0x05 so a stock server just
            ignores it. */
         constexpr u8 TypeScope     = 0x20;
+        /* RyuLink membership extension. The server accepts no game traffic
+           until it has validated this app-issued, revocable credential. */
+        constexpr u8 TypeRelayCredential = 0x21;
+        constexpr u8 TypeRelayDenied     = 0x22;
 
         /* IP header id of our wrapped frames - the receiver dispatches on it. */
         constexpr u16 IpIdControl = 0x4243;   /* "BC": LANDiscovery packets   */
@@ -95,6 +99,7 @@ namespace ams::mitm::ldn::relay {
         /* The one virtual relay address (10.13.x.x), in host byte order.
            Zero means it has not been supplied through the Core IPC. */
         std::atomic<u32> g_virtual_ip{0};
+        char g_relay_credential[RelayCredentialMaxLen + 1] = {};
         constexpr bool EnableRandomVirtualIp = false;
         static_assert(!EnableRandomVirtualIp);
     }
@@ -151,6 +156,45 @@ namespace ams::mitm::ldn::relay {
             }
             fs::CloseFile(f);
         }
+
+        void ReadRelayCredential() {
+            g_relay_credential[0] = '\0';
+            fs::FileHandle f;
+            if (R_FAILED(fs::OpenFile(std::addressof(f), RelayCredentialPath, fs::OpenMode_Read))) {
+                return;
+            }
+            s64 size = 0;
+            if (R_SUCCEEDED(fs::GetFileSize(std::addressof(size), f)) && size > 0 && size <= static_cast<s64>(RelayCredentialMaxLen) &&
+                R_SUCCEEDED(fs::ReadFile(f, 0, g_relay_credential, static_cast<size_t>(size)))) {
+                g_relay_credential[size] = '\0';
+            }
+            fs::CloseFile(f);
+        }
+
+        void PersistRelayCredential() {
+            fs::FileHandle f;
+            if (R_FAILED(fs::OpenFile(std::addressof(f), RelayCredentialPath, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
+                if (R_FAILED(fs::CreateFile(RelayCredentialPath, 0)) ||
+                    R_FAILED(fs::OpenFile(std::addressof(f), RelayCredentialPath, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
+                    LogFormat("relay: credential persistence failed (open)");
+                    return;
+                }
+            }
+            const size_t size = std::strlen(g_relay_credential);
+            if (R_FAILED(fs::SetFileSize(f, 0))) {
+                LogFormat("relay: credential persistence failed (truncate)");
+                fs::CloseFile(f);
+                return;
+            }
+            if (R_FAILED(fs::WriteFile(f, 0, g_relay_credential, size, fs::WriteOption::Flush))) {
+                LogFormat("relay: credential persistence failed (write)");
+            }
+            fs::CloseFile(f);
+        }
+
+        bool ServerRequiresCredential() {
+            return std::strcmp(ServerHost(), "gateway.ryulink.xyz") == 0;
+        }
     }
 
     void LoadConfig() {
@@ -166,6 +210,7 @@ namespace ams::mitm::ldn::relay {
         g_count = 0;
         g_selected = 0;
         g_enabled = false;
+        ReadRelayCredential();
         char pending_selected[ServerNameLen] = {};
 
         char buf[1024];
@@ -379,6 +424,28 @@ namespace ams::mitm::ldn::relay {
         const int i = g_selected.load();
         return (i >= 0 && i < g_count) ? g_servers[i].port : 0;
     }
+    Result SetRelayCredential(const void *credential, size_t size) {
+        if (size > RelayCredentialMaxLen) {
+            return MAKERESULT(0xFD, 105);
+        }
+        const char *value = static_cast<const char *>(credential);
+        for (size_t i = 0; i < size; ++i) {
+            if (value[i] < '!' || value[i] > '~') {
+                return MAKERESULT(0xFD, 105);
+            }
+        }
+        std::memcpy(g_relay_credential, value, size);
+        g_relay_credential[size] = '\0';
+        PersistRelayCredential();
+        R_SUCCEED();
+    }
+
+    Result RequireRelayCredential() {
+        if (ServerRequiresCredential() && g_relay_credential[0] == '\0') {
+            return ResultRelayCredentialMissing;
+        }
+        R_SUCCEED();
+    }
 
     /* Rendezvous for bsd:u IPC threads to reach the relay socket (owned by the
        LANDiscovery worker). Open()/Close() register/unregister under the mutex
@@ -509,6 +576,7 @@ namespace ams::mitm::ldn::relay {
 
     Result RelayTransport::Open() {
         R_TRY(RequireVirtualIp());
+        R_TRY(RequireRelayCredential());
         /* Internet route: nifm session + request + registered socket, NOT
            LocalNetworkMode. */
         Result rc = NifmSessionManager::Acquire();
@@ -650,8 +718,22 @@ namespace ams::mitm::ldn::relay {
         if (m_fd < 0) {
             return -1;
         }
+        /* Repeat with the existing five-second heartbeat: the first UDP auth
+           datagram can be lost, while the relay only revalidates daily. */
+        this->SendRelayCredential();
         const u8 ka = TypeKeepalive;
         return send(m_fd, &ka, sizeof(ka), 0);
+    }
+
+    int RelayTransport::SendRelayCredential() {
+        if (m_fd < 0 || g_relay_credential[0] == '\0') {
+            return -1;
+        }
+        const size_t len = std::strlen(g_relay_credential);
+        u8 frame[1 + RelayCredentialMaxLen];
+        frame[0] = TypeRelayCredential;
+        std::memcpy(frame + 1, g_relay_credential, len);
+        return send(m_fd, frame, len + 1, 0);
     }
 
     int RelayTransport::SendPing() {
@@ -923,6 +1005,11 @@ namespace ams::mitm::ldn::relay {
         /* Anything from the server proves the path is alive. */
         m_ping_misses = 0;
         const u8 type = buf[0] & 0x7f;
+        if (type == TypeRelayDenied) {
+            SetRelayEnabled(false);
+            LogFormat("relay xport: membership denied; relay disabled");
+            return 0;
+        }
         if (type == TypePing) {
             /* Echo of our probe. Remember the server supports it, so from now
                on unanswered pings are meaningful (PathDead). */

@@ -47,6 +47,11 @@ Usage:
     python relay_server.py                 # bind 0.0.0.0:11451
     python relay_server.py --port 11455
     python relay_server.py -v              # log every relayed packet
+    python relay_server.py --membership-url https://api.example/relay/validate
+
+When --membership-url is set, every client needs an App-issued relay
+credential. The URL is checked at most once per endpoint per day; a denied
+client receives a control packet that makes the console persist Relay OFF.
 
 For play across the internet, forward the chosen UDP port to this machine and
 give the players this machine's PUBLIC IP (or a hostname) and port.
@@ -54,15 +59,21 @@ give the players this machine's PUBLIC IP (or a hostname) and port.
 import argparse
 import socket
 import time
+import json
+import urllib.error
+import urllib.request
 
 TYPE_KEEPALIVE = 0x00
 TYPE_IPV4 = 0x01
 TYPE_PING = 0x02
 TYPE_IPV4_FRAG = 0x03
 TYPE_SCOPE = 0x20
+TYPE_RELAY_CREDENTIAL = 0x21
+TYPE_RELAY_DENIED = 0x22
 IDLE_TIMEOUT = 60.0   # seconds before a silent client is forgotten
 SCOPE_TIMEOUT = 300.0  # seconds before a stale scope declaration is forgotten
 DISCOVERY_PORT = 11452  # LANDiscovery control traffic - always crosses scopes
+MEMBERSHIP_RECHECK_SECONDS = 24 * 60 * 60
 
 
 def ip_str(b):
@@ -84,12 +95,50 @@ def udp_dport(payload):
     return (payload[ihl + 2] << 8) | payload[ihl + 3]
 
 
+class MembershipAuthorizer:
+    """Control-plane membership gate, cached per UDP endpoint for one day."""
+
+    def __init__(self, url):
+        self.url = url
+        self.allowed_until = {}
+
+    def validate(self, token):
+        body = json.dumps({"credential": token}).encode()
+        request = urllib.request.Request(self.url, data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                result = json.load(response)
+            return bool(result.get("data", {}).get("allowed"))
+        except (OSError, ValueError, urllib.error.HTTPError):
+            return False
+
+    def authenticate(self, endpoint, token, now):
+        if not token:
+            return False
+        cached = self.allowed_until.get(endpoint)
+        if cached and cached[0] == token and cached[1] > now:
+            return True
+        if not self.validate(token):
+            self.allowed_until.pop(endpoint, None)
+            return False
+        self.allowed_until[endpoint] = (token, now + MEMBERSHIP_RECHECK_SECONDS)
+        return True
+
+    def allows(self, endpoint, now):
+        cached = self.allowed_until.get(endpoint)
+        return cached is not None and cached[1] > now
+
+
 def main():
     ap = argparse.ArgumentParser(description="Self-hosted lan-play/ldn_mitm relay server.")
     ap.add_argument("--port", "-p", type=int, default=11451, help="UDP port to bind (default 11451)")
     ap.add_argument("--bind", default="0.0.0.0", help="address to bind (default 0.0.0.0)")
     ap.add_argument("--verbose", "-v", action="store_true", help="log every relayed packet")
+    ap.add_argument("--membership-url", help="control-plane relay credential validator; enables VIP-only access")
     args = ap.parse_args()
+
+    membership = MembershipAuthorizer(args.membership_url) if args.membership_url else None
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -156,6 +205,21 @@ def main():
 
         now = time.time()
         msg_type, payload = data[0], data[1:]
+
+        if membership:
+            if msg_type == TYPE_RELAY_CREDENTIAL:
+                try:
+                    token = payload.decode("ascii") if 0 < len(payload) <= 127 else ""
+                except UnicodeDecodeError:
+                    token = ""
+                if not membership.authenticate(addr, token, now):
+                    sock.sendto(bytes((TYPE_RELAY_DENIED,)), addr)
+                    if args.verbose:
+                        print(f"[relay] membership denied {addr[0]}:{addr[1]}")
+                continue
+            if not membership.allows(addr, now):
+                sock.sendto(bytes((TYPE_RELAY_DENIED,)), addr)
+                continue
 
         if msg_type == TYPE_KEEPALIVE:
             # Refresh (never learn) mappings for this endpoint - keepalives

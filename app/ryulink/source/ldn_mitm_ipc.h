@@ -8,7 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-enum { RyuLinkLdnMitmRelayNameSize = 32 };
+enum { RyuLinkLdnMitmRelayNameSize = 32, RyuLinkLdnMitmRelayCredentialBytes = 128 };
 
 typedef struct {
     bool enabled;
@@ -35,3 +35,6 @@ bool ryuLinkLdnMitmIpcSetInternetRelayEnabled(bool enabled);
 
 /** Writes the host-order virtual IPv4 lease returned by the device API. */
 bool ryuLinkLdnMitmIpcSetVirtualIp(uint32_t ip);
+
+/** Stores the App-issued relay credential outside relay.cfg. Pass NULL to clear it. */
+bool ryuLinkLdnMitmIpcSetRelayCredential(const char *credential);

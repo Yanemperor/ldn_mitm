@@ -530,6 +530,27 @@ bool ryuLinkApiGetVirtualIp(RyuLinkAuthSession *session, const char *server_devi
     return true;
 }
 
+bool ryuLinkApiGetRelayCredential(RyuLinkAuthSession *session, const char *server_device_id,
+                                  char out_credential[RyuLinkRelayCredentialBytes]) {
+    char url[176], object[256];
+    Response response;
+    long status;
+    const char *data;
+
+    if (!api_ready(session) || !server_device_id_valid(server_device_id) || !out_credential ||
+        snprintf(url, sizeof(url), "https://api.ryulink.xyz/app-api/ryulink/devices/%s/relay-credential",
+                 server_device_id) >= (int)sizeof(url)) return false;
+    if (!app_request(url, "POST", "{}", &status, &response) || !api_success(&response)) {
+        if (api_code(&response) == 40302) session->needs_vip = true;
+        return api_error(session, status, L("VIP MEMBERSHIP REQUIRED", "需要开通 VIP 会员"));
+    }
+    data = strstr(response.data, "\"data\"");
+    if (!data || !next_object(data, object, sizeof(object)) ||
+        !get_string(object, "credential", out_credential, RyuLinkRelayCredentialBytes))
+        return api_error(session, status, L("INVALID RELAY CREDENTIAL", "中继凭证响应无效"));
+    return true;
+}
+
 static const char *next_object(const char *cursor, char *object, size_t object_size) {
     const char *start = strchr(cursor, '{'); size_t length = 0; int depth = 0; bool quoted = false;
     if (!start) return NULL;

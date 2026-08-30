@@ -364,7 +364,35 @@ static bool configure_virtual_ip(RyuLinkApp *app) {
     return true;
 }
 
+static bool configure_relay_credential(RyuLinkApp *app) {
+    char server_device_id[RyuLinkServerDeviceIdBytes];
+    char credential[RyuLinkRelayCredentialBytes];
+
+    if (!ryuLinkApiEnsureServerDevice(&app->auth, false, server_device_id) ||
+        !ryuLinkApiGetRelayCredential(&app->auth, server_device_id, credential) ||
+        !ryuLinkLdnMitmIpcSetRelayCredential(credential)) {
+        memset(credential, 0, sizeof(credential));
+        (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+        snprintf(app->join_message, sizeof(app->join_message), "%s",
+                 app->auth.message[0] ? app->auth.message : L("RELAY CREDENTIAL SETUP FAILED", "中继凭证设置失败"));
+        return false;
+    }
+    memset(credential, 0, sizeof(credential));
+    return true;
+}
+
+static bool require_relay_membership(RyuLinkApp *app) {
+    if (app->auth.vip_active) return true;
+    (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+    (void)ryuLinkLdnMitmIpcSetRelayCredential(NULL);
+    app->vip_upsell_pending = true;
+    snprintf(app->join_message, sizeof(app->join_message), "%s",
+             L("VIP REQUIRED - SCAN QR TO ACTIVATE", "需要 VIP 会员，请扫码开通"));
+    return false;
+}
+
 static bool enable_relay(RyuLinkApp *app) {
+    if (!require_relay_membership(app)) return false;
     if (ryuLinkLdnMitmIpcSetInternetRelayEnabled(true)) return true;
     (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
     snprintf(app->join_message, sizeof(app->join_message), "%s",
@@ -383,6 +411,8 @@ static void set_network_mtu(RyuLinkApp *app) {
 static bool start_no_computer_relay(RyuLinkApp *app) {
     app->join_message[0] = '\0';
     (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+    if (!require_relay_membership(app)) return false;
+    app->vip_upsell_pending = false;
     if (!configure_virtual_ip(app)) {
         if (!app->join_message[0]) {
             snprintf(app->join_message, sizeof(app->join_message), "%s",
@@ -390,6 +420,7 @@ static bool start_no_computer_relay(RyuLinkApp *app) {
         }
         return false;
     }
+    if (!configure_relay_credential(app)) return false;
     if (!enable_relay(app)) return false;
     snprintf(app->join_message, sizeof(app->join_message), "%s",
              L("RELAY READY - START YOUR GAME", "中继已就绪，启动游戏即可联机"));

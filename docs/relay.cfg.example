@@ -23,7 +23,6 @@
 #                   (multiples of 256, and 255/511/767/...) and 9472-9727
 #                   (10.13.37.x, popular with lan-play users) are rejected and
 #                   redrawn; anything else from 1 to 65534 works.
-
 my-pc        82.65.234.243:11455
 lan-play     104.238.152.86
 public       relay.example.com

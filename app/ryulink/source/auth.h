@@ -29,6 +29,7 @@ typedef struct {
 } RyuLinkAuthSession;
 
 enum { RyuLinkApiRoomLimit = 1, RyuLinkApiNodeLimit = 8 };
+enum { RyuLinkRelayCredentialBytes = 128 };
 
 typedef struct {
     uint64_t id;
@@ -93,6 +94,9 @@ bool ryuLinkApiEnsureServerDevice(RyuLinkAuthSession *session, bool force_regist
 /** Gets this device's permanent virtual IP. */
 bool ryuLinkApiGetVirtualIp(RyuLinkAuthSession *session, const char *server_device_id,
                             char out_virtual_ip[16]);
+/** Issues a dedicated relay-only credential for an active VIP device. */
+bool ryuLinkApiGetRelayCredential(RyuLinkAuthSession *session, const char *server_device_id,
+                                  char out_credential[RyuLinkRelayCredentialBytes]);
 /** password may be NULL/empty for PUBLIC and VIP zones; required for PRIVATE (私服). */
 bool ryuLinkApiJoinRoom(RyuLinkAuthSession *session, uint64_t room_id, const char *device_id,
                         const char *password, RyuLinkApiJoin *join);

@@ -43,6 +43,7 @@ namespace ams::mitm::ldn {
             Result SetSelectedRelayServer(u32 index);
             Result SetVirtualIp(u32 ip);
             Result GetVirtualIp(sf::Out<u32> ip);
+            Result SetRelayCredential(sf::InAutoSelectBuffer credential);
     };
     static_assert(ams::mitm::ldn::IsILdnConfig<LdnConfig>);
 

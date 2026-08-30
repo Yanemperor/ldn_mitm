@@ -29,6 +29,10 @@ namespace ams::mitm::ldn {
 
         /* Server list config; format documented at LoadConfig (relay_client.cpp). */
         constexpr const char RelayConfigPath[] = "sdmc:/config/ldn_mitm/relay.cfg";
+        /* App-issued, revocable credential.  It deliberately lives outside
+           relay.cfg so the public relay profile never carries a secret. */
+        constexpr const char RelayCredentialPath[] = "sdmc:/config/ldn_mitm/relay.credential";
+        constexpr size_t RelayCredentialMaxLen = 127;
         constexpr int MaxServers    = 8;
         constexpr int ServerNameLen = 32;
 
@@ -60,9 +64,12 @@ namespace ams::mitm::ldn {
         /* Relay virtual IPv4 state, in host byte order. SetVirtualIp is the
            only active writer; zero means the caller has not configured it. */
         constexpr Result ResultVirtualIpNotConfigured = MAKERESULT(0xFD, 103);
+        constexpr Result ResultRelayCredentialMissing = MAKERESULT(0xFD, 104);
         Result SetVirtualIp(u32 ip);
         u32 GetVirtualIp();
         Result RequireVirtualIp(u32 *out_ip = nullptr);
+        Result SetRelayCredential(const void *credential, size_t size);
+        Result RequireRelayCredential();
 
         /* Selected relay server. ServerIp is the literal IPv4 (host order) or
            0 for a hostname; ServerHost is the raw address token (RelayTransport
@@ -149,6 +156,7 @@ namespace ams::mitm::ldn {
                 int SendScope(u32 token);
 
             private:
+                int SendRelayCredential();
                 /* Build [0x01][IPv4+UDP+payload] and send to the relay. */
                 int SendWrapped(u32 src, u32 dst, u16 sport, u16 dport, u16 ip_id, const void *payload, size_t len);
 

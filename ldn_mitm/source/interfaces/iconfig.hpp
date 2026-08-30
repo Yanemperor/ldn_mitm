@@ -5,7 +5,8 @@ namespace ams::mitm::ldn {
 
     constexpr u32 LdnConfigSetVirtualIpCommandId = 65015;
     constexpr u32 LdnConfigGetVirtualIpCommandId = 65016;
-    static_assert(LdnConfigGetVirtualIpCommandId == LdnConfigSetVirtualIpCommandId + 1);
+    constexpr u32 LdnConfigSetRelayCredentialCommandId = 65017;
+    static_assert(LdnConfigSetRelayCredentialCommandId == LdnConfigGetVirtualIpCommandId + 1);
 
     struct LdnMitmVersion {
         char raw[32];
@@ -34,6 +35,7 @@ namespace ams::mitm::ldn {
     AMS_SF_METHOD_INFO(C, H, 65013, Result, SetSelectedRelayServer, 	(u32 index), 								(index))	\
     AMS_SF_METHOD_INFO(C, H, 65014, Result, SetInternetRelayEnabled, (bool enabled),                                      (enabled)) \
     AMS_SF_METHOD_INFO(C, H, ams::mitm::ldn::LdnConfigSetVirtualIpCommandId, Result, SetVirtualIp, (u32 ip),               (ip)) \
-    AMS_SF_METHOD_INFO(C, H, ams::mitm::ldn::LdnConfigGetVirtualIpCommandId, Result, GetVirtualIp, (ams::sf::Out<u32> ip), (ip))
+    AMS_SF_METHOD_INFO(C, H, ams::mitm::ldn::LdnConfigGetVirtualIpCommandId, Result, GetVirtualIp, (ams::sf::Out<u32> ip), (ip)) \
+    AMS_SF_METHOD_INFO(C, H, ams::mitm::ldn::LdnConfigSetRelayCredentialCommandId, Result, SetRelayCredential, (ams::sf::InAutoSelectBuffer credential), (credential))
 
     AMS_SF_DEFINE_INTERFACE(ams::mitm::ldn, ILdnConfig, AMS_LDN_CONFIG, 0x14c8af2c)

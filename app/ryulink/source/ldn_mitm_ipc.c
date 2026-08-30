@@ -20,6 +20,7 @@ enum {
     LdnMitmCmdGetSelectedRelayServer = 65012,
     LdnMitmCmdSetInternetRelayEnabled = 65014,
     LdnMitmCmdSetVirtualIp = 65015,
+    LdnMitmCmdSetRelayCredential = 65017,
 };
 
 static Service g_ldn_service;
@@ -108,4 +109,14 @@ bool ryuLinkLdnMitmIpcSetInternetRelayEnabled(bool enabled) {
 bool ryuLinkLdnMitmIpcSetVirtualIp(uint32_t ip) {
     if (!ryuLinkLdnMitmIpcInitialize()) return false;
     return R_SUCCEEDED(serviceDispatchIn(&g_config_service, LdnMitmCmdSetVirtualIp, ip));
+}
+
+bool ryuLinkLdnMitmIpcSetRelayCredential(const char *credential) {
+    static const char EmptyCredential[] = "";
+    const char *value = credential ? credential : EmptyCredential;
+    size_t size = strlen(value);
+    if (size >= RyuLinkLdnMitmRelayCredentialBytes || !ryuLinkLdnMitmIpcInitialize()) return false;
+    return R_SUCCEEDED(serviceDispatch(&g_config_service, LdnMitmCmdSetRelayCredential,
+                                       .buffer_attrs = { SfBufferAttr_HipcAutoSelect | SfBufferAttr_In },
+                                       .buffers = { { value, size } }));
 }

@@ -50,6 +50,7 @@ namespace ams::mitm::ldn {
     Result LdnConfig::SetInternetRelayEnabled(bool enabled) {
         if (enabled) {
             R_TRY(relay::RequireVirtualIp());
+            R_TRY(relay::RequireRelayCredential());
         }
         relay::SetRelayEnabled(enabled);
         R_SUCCEED();
@@ -78,5 +79,8 @@ namespace ams::mitm::ldn {
     Result LdnConfig::GetVirtualIp(sf::Out<u32> ip) {
         ip.SetValue(relay::GetVirtualIp());
         R_SUCCEED();
+    }
+    Result LdnConfig::SetRelayCredential(sf::InAutoSelectBuffer credential) {
+        return relay::SetRelayCredential(credential.GetPointer(), credential.GetSize());
     }
 }
