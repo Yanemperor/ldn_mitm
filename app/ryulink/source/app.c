@@ -2,6 +2,7 @@
 #include "device_identity_store.h"
 #include "ldn_mitm_ipc.h"
 #include "localization.h"
+#include "network_profile.h"
 #include "qrcodegen.h"
 #include "room_selection_store.h"
 #include "virtual_ip.h"
@@ -162,10 +163,18 @@ static void draw_home(const RyuLinkApp *app) {
 
     ryuLinkUiRoundedPanel(335, 178, 881, 430, 16, ColorPanel);
     if (no_computer) {
+        u32 mtu_color = app->network_mtu_known && app->network_mtu_is_1500 ? ColorGood : ColorPanelMuted;
+        if (update_qr_code("https://account.ryulink.xyz/ryulink/account")) {
+            draw_qr_code(1040, 210, 132);
+            ryuLinkUiText(1046, 370, 2, ColorMuted, L("SCAN FOR VIP", "扫码获取VIP"));
+        }
         ryuLinkUiText(390, 225, 3, ColorPrimary, L("NO-PC BETA", "免电脑 beta"));
         ryuLinkUiText(390, 300, 2, ColorText, L("START RELAY WITH YOUR VIRTUAL IP", "使用虚拟 IP 开启中继"));
         ryuLinkUiText(390, 345, 2, ColorMuted,
                       L("NO COMPUTER RELAY IS REQUIRED", "无需使用电脑中继"));
+        ryuLinkUiRoundedPanel(390, 438, 180, 72, 12, mtu_color);
+        ryuLinkUiText(416, 460, 2, ColorText, L("MTU: 1500", "MTU: 1500"));
+        ryuLinkUiText(413, 484, 2, ColorText, L("X SET MTU", "X 设置 MTU"));
         ryuLinkUiRoundedPanel(590, 438, 340, 72, 12, ColorAccent);
         ryuLinkUiText(670, 463, 3, ColorText, L("A START RELAY", "A 开启中继"));
         if (app->join_message[0])
@@ -261,9 +270,16 @@ static bool refresh_rooms(RyuLinkApp *app) {
     return ryuLinkApiListRooms(&app->auth, space_type_api(app->space_kind), NULL, &app->room_page);
 }
 
+static void refresh_network_mtu(RyuLinkApp *app) {
+    NifmNetworkProfileData profile;
+    app->network_mtu_known = R_SUCCEEDED(ryuLinkNetworkProfileReadCurrent(&profile));
+    app->network_mtu_is_1500 = app->network_mtu_known && profile.ip_setting_data.mtu == 1500;
+}
+
 static void enter_lobby(RyuLinkApp *app) {
     ryuLinkApiListNodes(&app->auth, app->nodes, &app->node_count);
     for (uint8_t i = 0; i < app->node_count; ++i) if (app->nodes[i].preferred) { app->selected_node = i; break; }
+    refresh_network_mtu(app);
     app->page = RyuLinkPage_Home;
 }
 
@@ -291,12 +307,16 @@ void ryuLinkAppUpdate(RyuLinkApp *app) {
     const u64 interval_ms = 90000ULL;
     u64 now;
     if (!app) return;
+    now = current_ms();
+    if (app->network_mtu_sync_pending && now >= app->network_mtu_sync_after_ms) {
+        app->network_mtu_sync_pending = false;
+        refresh_network_mtu(app);
+    }
     if (app->auth.state != RyuLinkAuth_Authenticated || !app->room_selection.active) return;
     if (!app->selection_applied_this_boot) {
         app->selection_applied_this_boot = true;
         refresh_selection_from_control_plane(app);
     }
-    now = current_ms();
     if (app->last_heartbeat_ms != 0 && now - app->last_heartbeat_ms < interval_ms) return;
     app->last_heartbeat_ms = now;
     (void)ryuLinkApiHeartbeatRoom(&app->auth, app->room_selection.room_id);
@@ -350,6 +370,14 @@ static bool enable_relay(RyuLinkApp *app) {
     snprintf(app->join_message, sizeof(app->join_message), "%s",
              L("LDN_MITM RELAY SETUP FAILED", "LDN_MITM 中继设置失败"));
     return false;
+}
+
+static void set_network_mtu(RyuLinkApp *app) {
+    (void)ryuLinkNetworkProfileSetCurrentMtu(1500);
+    app->network_mtu_known = false;
+    app->network_mtu_is_1500 = false;
+    app->network_mtu_sync_pending = true;
+    app->network_mtu_sync_after_ms = current_ms() + 5000;
 }
 
 static bool start_no_computer_relay(RyuLinkApp *app) {
@@ -494,6 +522,7 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
                 app->page = RyuLinkPage_RoomDetail;
             }
             break;
+        case RyuLinkPending_SetNetworkMtu: set_network_mtu(app); break;
         case RyuLinkPending_EnableNoComputerRelay: start_no_computer_relay(app); break;
         case RyuLinkPending_JoinRoom: join_room(app); break;
         case RyuLinkPending_LeaveRoom: leave_room(app); break;
@@ -515,7 +544,11 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
 
 void ryuLinkAppHandleInput(RyuLinkApp *app, u64 buttons) {
     if (app->pending != RyuLinkPending_None) return;
-    if (app->page == RyuLinkPage_Splash) { if ((buttons & HidNpadButton_A) || current_ms() - app->splash_started_ms > 1200) app->page = RyuLinkPage_Login; return; }
+    if (app->page == RyuLinkPage_Splash) {
+        if ((buttons & HidNpadButton_A) || current_ms() - app->splash_started_ms > 1200)
+            app->page = RyuLinkPage_Login;
+        return;
+    }
     if (app->page == RyuLinkPage_Login) {
         if (app->auth.state == RyuLinkAuth_Idle && ryuLinkAuthHasPersistedSession()) { begin_pending(app, RyuLinkPending_AuthRestore); return; }
         if (app->auth.state == RyuLinkAuth_AwaitingBrowser) {
@@ -566,6 +599,10 @@ void ryuLinkAppHandleInput(RyuLinkApp *app, u64 buttons) {
         return;
     }
     if (app->page != RyuLinkPage_Home) return;
+    if ((buttons & HidNpadButton_X) && app->relay_mode == RyuLinkRelayMode_NoComputerBeta) {
+        begin_pending(app, RyuLinkPending_SetNetworkMtu);
+        return;
+    }
     if ((buttons & HidNpadButton_A) && app->relay_mode == RyuLinkRelayMode_NoComputerBeta) {
         begin_pending(app, RyuLinkPending_EnableNoComputerRelay);
         return;
@@ -628,6 +665,9 @@ void ryuLinkAppHandleTouch(RyuLinkApp *app, uint32_t x, uint32_t y) {
     if (x >= 80 && x < 300 && y >= 240 && y < 400)
         app->relay_mode = y < 320 ? RyuLinkRelayMode_NoComputerBeta : RyuLinkRelayMode_Computer;
     else if (app->relay_mode == RyuLinkRelayMode_NoComputerBeta &&
+             x >= 390 && x < 570 && y >= 438 && y < 510) {
+        begin_pending(app, RyuLinkPending_SetNetworkMtu);
+    } else if (app->relay_mode == RyuLinkRelayMode_NoComputerBeta &&
              x >= 590 && x < 930 && y >= 438 && y < 510) {
         begin_pending(app, RyuLinkPending_EnableNoComputerRelay);
     }

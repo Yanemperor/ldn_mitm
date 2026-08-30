@@ -77,13 +77,6 @@ Open the Tesla overlay to find these toggles:
    network profile (the `10.13.x.x` static profile is only for PC tunneling).
 
 Notes:
-- **Set your console's MTU to 1500** (System Settings → Internet → your
-  connection → Change Settings → MTU → `1500`). Several games — Street Fighter
-  30th Anniversary, Mortal Kombat 11, and other `nn::pia`-based titles —
-  require the interface MTU to be 1500, or their session layer silently drops
-  all peer traffic (you join, then nothing works). ldn_mitm respects whatever
-  MTU your profile has rather than forcing 1500, so you must set it yourself.
-  This applies to local play too, not just internet relay.
 - A relay server is a shared cloud box, not a per-player PC, so this still
   counts as "no PC on your end".
 - Wired Ethernet (USB adapter or dock) on both consoles noticeably reduces

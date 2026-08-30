@@ -29,6 +29,7 @@ typedef enum {
     RyuLinkPending_EnterLobby,
     RyuLinkPending_RefreshRooms,
     RyuLinkPending_GetRoom,
+    RyuLinkPending_SetNetworkMtu,
     RyuLinkPending_EnableNoComputerRelay,
     RyuLinkPending_JoinRoom,
     RyuLinkPending_LeaveRoom,
@@ -66,6 +67,10 @@ typedef struct {
     u8 selected_node;
     u8 node_count;
     u64 splash_started_ms;
+    bool network_mtu_known;
+    bool network_mtu_is_1500;
+    bool network_mtu_sync_pending;
+    u64 network_mtu_sync_after_ms;
     RyuLinkPendingAction pending;
     RyuLinkPage pending_target;
     RyuLinkAuthSession auth;
