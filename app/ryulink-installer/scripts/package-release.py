@@ -28,6 +28,23 @@ def prepare_payload() -> None:
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def wrap_macos_app(publish: Path, executable: Path, version: str) -> None:
+    app = publish / "RyuLink Installer.app"
+    binary = app / "Contents" / "MacOS" / "RyuLink Installer"
+    binary.parent.mkdir(parents=True)
+    shutil.move(executable, binary)
+    (app / "Contents" / "Info.plist").write_text("""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\"><dict>
+<key>CFBundleDisplayName</key><string>RyuLink Installer</string>
+<key>CFBundleExecutable</key><string>RyuLink Installer</string>
+<key>CFBundleIdentifier</key><string>xyz.ryulink.installer</string>
+<key>CFBundleName</key><string>RyuLink Installer</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>
+""".format(version=version), encoding="utf-8")
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
@@ -43,6 +60,7 @@ def main() -> None:
             subprocess.run(["dotnet", "publish", str(PROJECT), "-c", "Release", "-r", RIDS[target], "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeAllContentForSelfExtract=true", "-p:DebugType=None", "-p:DebugSymbols=false", "-o", str(publish)], check=True)
             executable = publish / ("RyuLink.Installer.exe" if target == "windows-x64" else "RyuLink.Installer")
             if not executable.is_file(): raise RuntimeError(f"missing publish executable: {executable}")
+            if target.startswith("macos-"): wrap_macos_app(publish, executable, args.version)
             archive = args.output / f"RyuLink-Installer-{args.version}-{target}.zip"
             with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
                 for path in sorted(publish.rglob("*")):
