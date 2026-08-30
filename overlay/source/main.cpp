@@ -56,10 +56,8 @@ public:
             list->addItem(new ConfigToggleListItem("Broadcast relay", ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
             list->addItem(new ConfigToggleListItem("Logging", ldnMitmGetLogging, ldnMitmSetLogging));
 
-            /* Internet relay: on/off toggle + a picker of the servers in
-               relay.cfg. Selecting one marks it active. */
+            /* Relay server picker. Membership now controls relay on/off. */
             list->addItem(new tsl::elm::CategoryHeader("Internet relay (cross-network play)"));
-            list->addItem(new ConfigToggleListItem("Internet relay", ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
 
             g_serverItems.clear();
             u32 count = 0;

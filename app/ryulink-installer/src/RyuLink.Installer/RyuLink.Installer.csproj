@@ -15,6 +15,7 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="..\..\payload\switch\RyuLink\RyuLink.nro"><Link>payload\switch\RyuLink\RyuLink.nro</Link><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory></Content>
+    <Content Include="..\..\payload\switch\.overlays\ldnmitm_config.ovl"><Link>payload\switch\.overlays\ldnmitm_config.ovl</Link><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory></Content>
     <Content Include="..\..\payload\atmosphere\contents\4200000000000010\exefs.nsp"><Link>payload\atmosphere\contents\4200000000000010\exefs.nsp</Link><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory></Content>
     <Content Include="..\..\payload\atmosphere\contents\4200000000000010\flags\boot2.flag"><Link>payload\atmosphere\contents\4200000000000010\flags\boot2.flag</Link><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory></Content>
     <Content Include="..\..\payload\config\ldn_mitm\relay.cfg"><Link>payload\config\ldn_mitm\relay.cfg</Link><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory></Content>

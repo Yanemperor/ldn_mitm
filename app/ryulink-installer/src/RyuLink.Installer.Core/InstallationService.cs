@@ -10,12 +10,15 @@ public sealed record InstallationResult(string BackupDirectory, IReadOnlyList<In
 
 public sealed class InstallationService
 {
+    private const string BootFlag = "atmosphere/contents/4200000000000010/flags/boot2.flag";
+    private const string RelayConfig = "config/ldn_mitm/relay.cfg";
     public static readonly string[] RequiredFiles =
     [
         "switch/RyuLink/RyuLink.nro",
+        "switch/.overlays/ldnmitm_config.ovl",
         "atmosphere/contents/4200000000000010/exefs.nsp",
-        "atmosphere/contents/4200000000000010/flags/boot2.flag",
-        "config/ldn_mitm/relay.cfg",
+        BootFlag,
+        RelayConfig,
     ];
 
     public async Task<InstallationResult> InstallAsync(string payloadDirectory, SdCardCandidate target, string backupRoot, IProgress<InstallationProgress>? progress = null, CancellationToken cancellationToken = default)
@@ -66,12 +69,12 @@ public sealed class InstallationService
                 throw new InvalidOperationException($"安装包缺少：{relativePath}");
             }
         }
-        if (new FileInfo(Path.Combine(payloadDirectory, RequiredFiles[2])).Length != 0)
+        if (new FileInfo(Path.Combine(payloadDirectory, BootFlag)).Length != 0)
         {
             throw new InvalidOperationException("boot2.flag 必须是零字节文件。");
         }
 
-        var relayConfig = File.ReadAllText(Path.Combine(payloadDirectory, RequiredFiles[3]));
+        var relayConfig = File.ReadAllText(Path.Combine(payloadDirectory, RelayConfig));
         foreach (var setting in new[] { @"(?im)^\s*enabled\s*=\s*1\s*$", @"(?im)^\s*broadcast\s*=\s*1\s*$", @"(?im)^\s*selected\s*=\s*RyuLink\s*$", @"(?im)^\s*RyuLink\s+.+$" })
         {
             if (!Regex.IsMatch(relayConfig, setting))
@@ -98,7 +101,7 @@ public sealed class InstallationService
     {
         var backupDirectory = Path.Combine(backupRoot, $"{Path.GetFileName(Path.TrimEndingDirectorySeparator(sdRoot))}-{DateTimeOffset.Now:yyyyMMdd_HHmmss}");
         var backedUp = false;
-        foreach (var relativePath in new[] { "atmosphere/contents/4200000000000010", "atmosphere/contents.disabled/420000000000000B", "config/ldn_mitm" })
+        foreach (var relativePath in new[] { "atmosphere/contents/4200000000000010", "atmosphere/contents.disabled/420000000000000B", "config/ldn_mitm", "switch/.overlays" })
         {
             var source = Path.Combine(sdRoot, relativePath);
             if (Directory.Exists(source))

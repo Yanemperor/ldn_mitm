@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a RyuLink Installer release with the current four-file payload."""
+"""Build a RyuLink Installer release with the current RyuLink payload."""
 
 from __future__ import annotations
 import argparse
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = ROOT.parents[1]
 PAYLOAD = ROOT / "payload"
 PROJECT = ROOT / "src" / "RyuLink.Installer" / "RyuLink.Installer.csproj"
-FILES = ("switch/RyuLink/RyuLink.nro", "atmosphere/contents/4200000000000010/exefs.nsp", "atmosphere/contents/4200000000000010/flags/boot2.flag", "config/ldn_mitm/relay.cfg")
+FILES = ("switch/RyuLink/RyuLink.nro", "switch/.overlays/ldnmitm_config.ovl", "atmosphere/contents/4200000000000010/exefs.nsp", "atmosphere/contents/4200000000000010/flags/boot2.flag", "config/ldn_mitm/relay.cfg")
 RIDS = {"windows-x64": "win-x64", "macos-arm64": "osx-arm64", "macos-x64": "osx-x64"}
 
 def prepare_payload() -> None:
