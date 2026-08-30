@@ -1,7 +1,6 @@
 #include <cstring>
 #include "ldnmitm_config.hpp"
 #include "relay_client.hpp"
-#include "network_mtu.hpp"
 #include "debug.hpp"
 
 namespace ams::mitm::ldn {
@@ -50,9 +49,6 @@ namespace ams::mitm::ldn {
             R_TRY(relay::RequireVirtualIp());
         }
         relay::SetRelayEnabled(enabled != 0);
-        if (enabled != 0) {
-            return EnsureCurrentNetworkMtu1500();
-        }
         R_SUCCEED();
     }
     Result LdnConfig::SetInternetRelayEnabled(bool enabled) {
