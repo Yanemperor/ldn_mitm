@@ -393,6 +393,7 @@ static bool require_relay_membership(RyuLinkApp *app) {
 
 static bool enable_relay(RyuLinkApp *app) {
     if (!require_relay_membership(app)) return false;
+    if (!configure_relay_credential(app)) return false;
     if (ryuLinkLdnMitmIpcSetInternetRelayEnabled(true)) return true;
     (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
     snprintf(app->join_message, sizeof(app->join_message), "%s",
@@ -420,7 +421,6 @@ static bool start_no_computer_relay(RyuLinkApp *app) {
         }
         return false;
     }
-    if (!configure_relay_credential(app)) return false;
     if (!enable_relay(app)) return false;
     snprintf(app->join_message, sizeof(app->join_message), "%s",
              L("RELAY READY - START YOUR GAME", "中继已就绪，启动游戏即可联机"));
