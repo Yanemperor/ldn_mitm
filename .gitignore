@@ -66,6 +66,7 @@ dkms.conf
 
 **/out
 **/build
+dist/
 
 # Keep the authoritative build/package documentation under version control.
 !docs/build/

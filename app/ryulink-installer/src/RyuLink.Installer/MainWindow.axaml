@@ -1,0 +1,13 @@
+<Window x:Class="RyuLink.Installer.MainWindow" xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="RyuLink 一键安装器" Width="640" Height="390" CanResize="False" WindowStartupLocation="CenterScreen">
+  <Grid Margin="28" RowDefinitions="Auto,Auto,*,Auto">
+    <TextBlock FontSize="28" FontWeight="SemiBold" Text="RyuLink 一键安装器" />
+    <TextBlock Grid.Row="1" Margin="0,12,0,18" TextWrapping="Wrap" Text="自动识别含 atmosphere 和 switch 目录的 Switch SD 卡。安装器只写入 RyuLink 的四个必需文件，并会在本机创建备份。" />
+    <StackPanel Grid.Row="2">
+      <TextBlock FontWeight="SemiBold" Text="检测到的 Switch SD 卡" />
+      <ComboBox x:Name="SdCardComboBox" Margin="0,8,0,12"><ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding RootPath}" /></DataTemplate></ComboBox.ItemTemplate></ComboBox>
+      <TextBlock x:Name="StatusTextBlock" TextWrapping="Wrap" />
+      <ProgressBar x:Name="InstallProgressBar" Margin="0,14,0,0" Height="8" Minimum="0" Maximum="1" Value="0" />
+    </StackPanel>
+    <StackPanel Grid.Row="3" HorizontalAlignment="Right" Orientation="Horizontal"><Button Width="110" Margin="0,0,10,0" Click="RescanButton_Click" Content="重新扫描" /><Button x:Name="InstallButton" Width="160" Click="InstallButton_Click" Content="安装并校验" /></StackPanel>
+  </Grid>
+</Window>
