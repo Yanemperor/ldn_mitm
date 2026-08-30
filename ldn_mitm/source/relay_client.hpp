@@ -32,6 +32,9 @@ namespace ams::mitm::ldn {
         /* App-issued, revocable credential.  It deliberately lives outside
            relay.cfg so the public relay profile never carries a secret. */
         constexpr const char RelayCredentialPath[] = "sdmc:/config/ldn_mitm/relay.credential";
+        /* The control plane keeps the lease stable; retaining the last lease
+           locally lets a game start without first opening the App again. */
+        constexpr const char RelayVirtualIpPath[] = "sdmc:/config/ldn_mitm/relay.virtual_ip";
         constexpr size_t RelayCredentialMaxLen = 127;
         constexpr int MaxServers    = 8;
         constexpr int ServerNameLen = 32;

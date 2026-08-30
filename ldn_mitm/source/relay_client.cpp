@@ -47,8 +47,9 @@ namespace ams::mitm::ldn::relay {
            away from us. Far from lan-play's 0x00-0x05 so a stock server just
            ignores it. */
         constexpr u8 TypeScope     = 0x20;
-        /* RyuLink membership extension. The server accepts no game traffic
-           until it has validated this app-issued, revocable credential. */
+        /* RyuLink membership extension. The server validates this credential
+           daily and can tell the Core to persist Relay OFF; it never gates
+           game-data forwarding. */
         constexpr u8 TypeRelayCredential = 0x21;
         constexpr u8 TypeRelayDenied     = 0x22;
 
@@ -171,6 +172,38 @@ namespace ams::mitm::ldn::relay {
             fs::CloseFile(f);
         }
 
+        void ReadVirtualIp() {
+            u32 ip = 0;
+            fs::FileHandle f;
+            if (R_SUCCEEDED(fs::OpenFile(std::addressof(f), RelayVirtualIpPath, fs::OpenMode_Read))) {
+                s64 size = 0;
+                if (R_SUCCEEDED(fs::GetFileSize(std::addressof(size), f)) && size == static_cast<s64>(sizeof(ip))) {
+                    (void)fs::ReadFile(f, 0, std::addressof(ip), sizeof(ip));
+                }
+                fs::CloseFile(f);
+            }
+            if (IsServerVirtualIp(ip)) {
+                g_virtual_ip = ip;
+                LogFormat("relay: restored virtual IP %08x", ip);
+            }
+        }
+
+        void PersistVirtualIp(u32 ip) {
+            fs::FileHandle f;
+            if (R_FAILED(fs::OpenFile(std::addressof(f), RelayVirtualIpPath, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
+                if (R_FAILED(fs::CreateFile(RelayVirtualIpPath, 0)) ||
+                    R_FAILED(fs::OpenFile(std::addressof(f), RelayVirtualIpPath, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
+                    LogFormat("relay: virtual IP persistence failed (open)");
+                    return;
+                }
+            }
+            if (R_FAILED(fs::SetFileSize(f, 0)) ||
+                R_FAILED(fs::WriteFile(f, 0, std::addressof(ip), sizeof(ip), fs::WriteOption::Flush))) {
+                LogFormat("relay: virtual IP persistence failed (write)");
+            }
+            fs::CloseFile(f);
+        }
+
         void PersistRelayCredential() {
             fs::FileHandle f;
             if (R_FAILED(fs::OpenFile(std::addressof(f), RelayCredentialPath, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
@@ -210,6 +243,7 @@ namespace ams::mitm::ldn::relay {
         g_count = 0;
         g_selected = 0;
         g_enabled = false;
+        ReadVirtualIp();
         ReadRelayCredential();
         char pending_selected[ServerNameLen] = {};
 
@@ -376,6 +410,7 @@ namespace ams::mitm::ldn::relay {
             return MAKERESULT(0xFD, 104);
         }
         g_virtual_ip = ip;
+        PersistVirtualIp(ip);
         LogFormat("relay: virtual IP configured %08x", ip);
         R_SUCCEED();
     }

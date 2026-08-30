@@ -49,9 +49,10 @@ Usage:
     python relay_server.py -v              # log every relayed packet
     python relay_server.py --membership-url https://api.example/relay/validate
 
-When --membership-url is set, every client needs an App-issued relay
-credential. The URL is checked at most once per endpoint per day; a denied
-client receives a control packet that makes the console persist Relay OFF.
+When --membership-url is set, an App-issued relay credential is checked at
+most once per endpoint per day. A denied client receives a control packet that
+makes the console persist Relay OFF. Membership is deliberately out of the
+game-data forwarding path, so validation can never hide rooms or delay play.
 
 For play across the internet, forward the chosen UDP port to this machine and
 give the players this machine's PUBLIC IP (or a hostname) and port.
@@ -96,7 +97,7 @@ def udp_dport(payload):
 
 
 class MembershipAuthorizer:
-    """Control-plane membership gate, cached per UDP endpoint for one day."""
+    """Daily control-plane membership check, cached per UDP endpoint."""
 
     def __init__(self, url):
         self.url = url
@@ -135,7 +136,7 @@ def main():
     ap.add_argument("--port", "-p", type=int, default=11451, help="UDP port to bind (default 11451)")
     ap.add_argument("--bind", default="0.0.0.0", help="address to bind (default 0.0.0.0)")
     ap.add_argument("--verbose", "-v", action="store_true", help="log every relayed packet")
-    ap.add_argument("--membership-url", help="control-plane relay credential validator; enables VIP-only access")
+    ap.add_argument("--membership-url", help="control-plane relay credential validator; sends Relay OFF for non-VIP")
     args = ap.parse_args()
 
     membership = MembershipAuthorizer(args.membership_url) if args.membership_url else None
@@ -216,9 +217,6 @@ def main():
                     sock.sendto(bytes((TYPE_RELAY_DENIED,)), addr)
                     if args.verbose:
                         print(f"[relay] membership denied {addr[0]}:{addr[1]}")
-                continue
-            if not membership.allows(addr, now):
-                sock.sendto(bytes((TYPE_RELAY_DENIED,)), addr)
                 continue
 
         if msg_type == TYPE_KEEPALIVE:

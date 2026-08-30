@@ -401,6 +401,19 @@ static bool enable_relay(RyuLinkApp *app) {
     return false;
 }
 
+/* Runs after each successful App sign-in. The server device retains its
+ * assigned virtual IP, while the Core retains the last value for game-only
+ * launches. A non-member is explicitly left with Relay OFF. */
+static void sync_relay_membership(RyuLinkApp *app) {
+    (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+    if (!app->auth.vip_active) {
+        (void)ryuLinkLdnMitmIpcSetRelayCredential(NULL);
+        return;
+    }
+    if (!configure_virtual_ip(app)) return;
+    (void)enable_relay(app);
+}
+
 static void set_network_mtu(RyuLinkApp *app) {
     (void)ryuLinkNetworkProfileSetCurrentMtu(1500);
     app->network_mtu_known = false;
@@ -536,12 +549,12 @@ void ryuLinkAppRunPending(RyuLinkApp *app) {
         case RyuLinkPending_LoginStart: ryuLinkAuthStart(&app->auth); break;
         case RyuLinkPending_AuthRestore:
             if (ryuLinkAuthRestore(&app->auth)) {
-                (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+                sync_relay_membership(app);
                 enter_lobby(app);
             }
             break;
         case RyuLinkPending_EnterLobby:
-            (void)ryuLinkLdnMitmIpcSetInternetRelayEnabled(false);
+            sync_relay_membership(app);
             enter_lobby(app);
             break;
         case RyuLinkPending_RefreshRooms: refresh_rooms(app); break;
