@@ -153,7 +153,11 @@ static bool request(const char *url, const char *form, const char *token, long *
         curl_easy_setopt(curl, CURLOPT_USERAGENT, RYULINK_APP_USER_AGENT);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, receive);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
-        if (form) { headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded"); curl_easy_setopt(curl, CURLOPT_POSTFIELDS, form); }
+        if (form) {
+            headers = curl_slist_append(headers, form[0] == '{'
+                    ? "Content-Type: application/json" : "Content-Type: application/x-www-form-urlencoded");
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, form);
+        }
         if (token) { if (snprintf(authorization, sizeof(authorization), "Authorization: Bearer %s", token) >= (int)sizeof(authorization)) { curl_easy_cleanup(curl); break; } headers = curl_slist_append(headers, authorization); }
         if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         if (attempt == 1 && dns_fallback) {
@@ -325,13 +329,16 @@ static bool persist_session(RyuLinkAuthSession *session) {
     Response response;
     long status;
     char token[RyuLinkSessionTokenBytes];
+    char body[96];
 
-    if (!request(PlayerSessionExchangeUrl, "{}", g_access_token, &status, &response) || status != 200 ||
+    if (!g_stored_session.installation_id[0]) create_installation_id(g_stored_session.installation_id);
+    if (snprintf(body, sizeof(body), "{\"installationId\":\"%s\"}",
+                 g_stored_session.installation_id) >= (int)sizeof(body) ||
+        !request(PlayerSessionExchangeUrl, body, g_access_token, &status, &response) || status != 200 ||
         !get_string(response.data, "token", token, sizeof(token))) {
         fail(session, L("Unable to save the sign-in session.", "无法保存登录状态。"));
         return false;
     }
-    if (!g_stored_session.installation_id[0]) create_installation_id(g_stored_session.installation_id);
     snprintf(g_stored_session.session_token, sizeof(g_stored_session.session_token), "%s", token);
     if (!ryuLinkSessionSave(&g_stored_session)) {
         memset(token, 0, sizeof(token));
