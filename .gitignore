@@ -75,6 +75,9 @@ dist/
 # misc
 .DS_Store
 
+# Local release inputs and deployment outputs
+.release/
+
 make.bat
 *.log
 .vscode
