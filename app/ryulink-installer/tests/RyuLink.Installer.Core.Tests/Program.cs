@@ -29,6 +29,16 @@ try
         var target = SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(sd, file.RelativePath)));
         if (!source.SequenceEqual(target)) throw new Exception($"hash mismatch: {file.RelativePath}");
     }
-    Console.WriteLine("Installer core test passed: backup, exact five-file copy, and SHA-256 verification.");
+    await File.WriteAllTextAsync(Path.Combine(sd, "switch", "RyuLink", "obsolete-file"), "obsolete");
+    await File.WriteAllTextAsync(Path.Combine(sd, "config", "ldn_mitm", "unrelated.cfg"), "preserve");
+    var removal = await new InstallationService().RemoveHistoricalVersionFromRootAsync(sd);
+    if (removal.RemovedPaths.Count != 4
+        || Directory.Exists(Path.Combine(sd, "switch", "RyuLink"))
+        || File.Exists(Path.Combine(sd, "switch", ".overlays", "ldnmitm_config.ovl"))
+        || Directory.Exists(Path.Combine(sd, "atmosphere", "contents", "4200000000000010"))
+        || File.Exists(Path.Combine(sd, "config", "ldn_mitm", "relay.cfg"))
+        || !File.Exists(Path.Combine(sd, "config", "ldn_mitm", "unrelated.cfg"))
+        || !File.Exists(Path.Combine(sd, "atmosphere", "contents.disabled", "420000000000000B", "exefs.nsp"))) throw new Exception("historical version removal scope failed");
+    Console.WriteLine("Installer core test passed: backup, exact five-file copy, SHA-256 verification, and restricted historical-version removal.");
 }
 finally { if (Directory.Exists(root)) Directory.Delete(root, true); }

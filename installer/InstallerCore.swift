@@ -31,6 +31,12 @@ enum SwitchInstaller {
         "atmosphere/contents/4200000000000010/flags/boot2.flag",
         "config/ldn_mitm/relay.cfg",
     ]
+    static let historicalVersionPaths = [
+        "switch/RyuLink",
+        "switch/.overlays/ldnmitm_config.ovl",
+        "atmosphere/contents/4200000000000010",
+        "config/ldn_mitm/relay.cfg",
+    ]
 
     static func findSwitchVolumes() -> [URL] {
         let keys: Set<URLResourceKey> = [.volumeIsRemovableKey, .volumeNameKey]
@@ -68,6 +74,23 @@ enum SwitchInstaller {
 
         try removeResourceForkSidecars(from: card)
         return InstallResult(backupDirectory: backup, files: installed)
+    }
+
+    /// Removes only files owned by RyuLink and its enabled ldn_mitm Core.
+    /// Other Atmosphère content and the legacy disabled Core are intentionally preserved.
+    static func removeHistoricalVersion(from card: URL) throws -> [String] {
+        guard looksLikeSwitchCard(card) else { throw InstallerError.noSwitchCard }
+
+        let fm = FileManager.default
+        var removed: [String] = []
+        for relativePath in historicalVersionPaths {
+            let target = card.appendingPathComponent(relativePath)
+            if fm.fileExists(atPath: target.path) {
+                try fm.removeItem(at: target)
+                removed.append(relativePath)
+            }
+        }
+        return removed
     }
 
     static func validatePayload(at payload: URL) throws {

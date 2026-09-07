@@ -7,11 +7,19 @@ public enum InstallationStep { ValidatingPayload, BackingUpExistingFiles, Copyin
 public sealed record InstallationProgress(InstallationStep Step, string Message);
 public sealed record InstalledFile(string RelativePath, string Sha256);
 public sealed record InstallationResult(string BackupDirectory, IReadOnlyList<InstalledFile> Files);
+public sealed record HistoricalVersionRemovalResult(IReadOnlyList<string> RemovedPaths);
 
 public sealed class InstallationService
 {
     private const string BootFlag = "atmosphere/contents/4200000000000010/flags/boot2.flag";
     private const string RelayConfig = "config/ldn_mitm/relay.cfg";
+    private static readonly string[] HistoricalVersionPaths =
+    [
+        "switch/RyuLink",
+        "switch/.overlays/ldnmitm_config.ovl",
+        "atmosphere/contents/4200000000000010",
+        RelayConfig,
+    ];
     public static readonly string[] RequiredFiles =
     [
         "switch/RyuLink/RyuLink.nro",
@@ -58,6 +66,38 @@ public sealed class InstallationService
 
         progress?.Report(new(InstallationStep.Completed, "安装并校验完成。请安全弹出 SD 卡后完整重启 CFW。"));
         return new(backupDirectory, installed);
+    }
+
+    /// <summary>
+    /// Removes only files and directories owned by RyuLink and its enabled ldn_mitm Core.
+    /// It intentionally does not touch other Atmosphère content or the legacy disabled Core.
+    /// </summary>
+    public Task<HistoricalVersionRemovalResult> RemoveHistoricalVersionAsync(SdCardCandidate target, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ValidateTarget(target);
+        return RemoveHistoricalVersionFromRootAsync(target.RootPath, cancellationToken);
+    }
+
+    public Task<HistoricalVersionRemovalResult> RemoveHistoricalVersionFromRootAsync(string sdRoot, CancellationToken cancellationToken = default)
+    {
+        var removed = new List<string>();
+        foreach (var relativePath in HistoricalVersionPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var path = GetManagedPath(sdRoot, relativePath);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                removed.Add(relativePath);
+            }
+            else if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+                removed.Add(relativePath);
+            }
+        }
+        return Task.FromResult<HistoricalVersionRemovalResult>(new(removed));
     }
 
     public static void ValidatePayload(string payloadDirectory)
@@ -156,5 +196,18 @@ public sealed class InstallationService
                 foreach (var sidecar in Directory.EnumerateFiles(directory, "._*")) File.Delete(sidecar);
             }
         }
+    }
+
+    private static string GetManagedPath(string sdRoot, string relativePath)
+    {
+        var root = Path.GetFullPath(sdRoot);
+        var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
+        var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!candidate.StartsWith(prefix, comparison))
+        {
+            throw new InvalidOperationException("拒绝删除 SD 卡根目录以外的文件。");
+        }
+        return candidate;
     }
 }
